@@ -15,11 +15,11 @@
 
 ## 어떻게 동작하나요
 
-1. **날씨 수집**: 기상청 단기예보(만안구, 또는 Open-Meteo)에서 시간대별 기온·습도·풍속·강수확률
+1. **날씨 수집**: 기상청 만안구 초단기실황(지금 기온)과 단기예보(시간별 기온·습도·풍속·강수확률). 없으면 Open-Meteo
 2. **캠퍼스 날씨 (AI)**: 남은 시각은 캠퍼스 보정 모델이 안양대 기온·습도·풍속을 예측, 지난 시각은 안양대 500m 격자 실측값
 3. **체감온도 (공식)**: 기상청 공식 그대로 (10~4월 바람: 기온 10°C 이하·풍속 1.3 m/s 이상일 때, 5~9월 습도) + 추위 민감도(±2°C)
 4. **옷차림 (AI)**: 시간대별 옷차림 단계를 예측해 가장 두껍게 입어야 하는 시간 기준으로 추천
-5. **지금 캠퍼스 체감온도**: GitHub Actions가 매시간 안양대 500m 격자 실측값을 받아 홈 화면에 표시
+5. **실시간 갱신**: GitHub Actions가 매시간 안양대 500m 격자 실측값과 기상청 만안구 실황·예보를 받아 사이트에 반영
 
 ### 캠퍼스 보정 모델 (Random Forest 회귀)
 
@@ -54,7 +54,7 @@ python server.py           # → http://localhost:5000
 
 - Git이 없으면 저장소의 **Code → Download ZIP**으로 받아 압축을 풀고, 폴더에서 **우클릭 → 터미널에서 열기**
 - 모델 파일(`data/*.joblib`)은 용량이 커서 올리지 않아요. 받은 컴퓨터마다 한 번 학습하세요 (약 20초)
-- 설치 없이 보려면 `docs/index.html`을 더블클릭 (웹 체험판, 실측값 대신 AI 예측 표시)
+- 설치 없이 보려면 `docs/index.html`을 더블클릭 (웹 체험판: 실시간 파일을 못 읽어 Open-Meteo 예보와 AI 예측 표시)
 
 | 증상 | 해결 |
 |---|---|
@@ -76,7 +76,9 @@ python server.py           # → http://localhost:5000
 
 ## 웹사이트 배포 (GitHub Pages)
 
-`.github/workflows/pages.yml`이 main에 올라올 때와 **매시간** `docs/`를 배포합니다. 배포할 때 저장소 비밀값의 인증키로 안양대 실측값을 받아 `campus_now.json`으로 함께 올려요. 사이트 파일에는 키가 들어가지 않습니다.
+`.github/workflows/pages.yml`이 main에 올라올 때와 **매시간** `docs/`를 배포합니다. 배포할 때 저장소 비밀값의 인증키로 안양대 실측값(`campus_now.json`)과 기상청 만안구 실황·단기예보(`forecast.json`)를 받아 함께 올려요. 사이트 파일에는 키가 들어가지 않습니다.
+
+API허브에서 **고해상도 격자자료**와 **단기예보** 둘 다 활용신청되어 있어야 해요. 단기예보 권한이 없으면 사이트는 Open-Meteo 예보로 계산합니다.
 
 처음 한 번만:
 
@@ -100,7 +102,7 @@ python server.py           # → http://localhost:5000
 | `config.py` | 좌표, 경로, 민감도 등 설정 |
 | `docs/` | 화면 (`index.html`), 웹 체험판 로직 (`standalone.js`), 웹용 모델 (`model.js`) |
 | `web_export.py` | 웹용 모델 만들기: `config.py`·`outfit.py`·학습 데이터를 바꾸면 다시 실행 |
-| `update_campus_now.py` | 안양대 실측값 → `docs/campus_now.json` (Actions가 매시간 실행) |
+| `update_live_weather.py` | 안양대 실측 → `docs/campus_now.json`, 만안구 실황·예보 → `docs/forecast.json` (Actions가 매시간 실행) |
 | `data/train_data.csv` | 캠퍼스 모델 학습 데이터 |
 | `notebooks/` | 학습 데이터를 만들고 실험한 Colab 노트북 (아래 참고) |
 

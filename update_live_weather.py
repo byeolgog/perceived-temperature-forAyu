@@ -1,0 +1,140 @@
+"""실시간 날씨 파일 만들기 (GitHub Actions가 매시간 실행 → GitHub Pages와 함께 배포).
+
+  docs/campus_now.json : 안양대 500m 격자 최신 실측 (기온·습도·풍속·체감온도)
+  docs/forecast.json   : 기상청 만안구 초단기실황(지금 기온) + 단기예보(시간별, 약 3일)
+
+HTML 버전(GitHub Pages)이 이 파일들을 읽어, 인증키 없이도 기상청 값으로 화면을 그린다.
+
+- 인증키는 환경변수 KMA_APIHUB_KEY에서만 읽는다 (GitHub 저장소 Secrets). 결과 파일에는 키가 없다.
+- 받기에 실패하면 지금 공개된 파일(PAGES_URL/파일이름)을 그대로 다시 쓴다. 그것도 없으면 오류만 기록.
+
+    KMA_APIHUB_KEY=키 python update_live_weather.py
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+import requests
+
+import config
+import weather
+
+DOCS = config.BASE_DIR / "docs"
+
+
+def parse_latest(text: str) -> dict | None:
+    """격자 API 텍스트 응답에서 가장 최근 정상 줄 (tm, ta, hm, ws_10m, ta_chi)."""
+    df = weather.parse_grid(text)
+    if df.empty:
+        return None
+    r = df.iloc[-1]
+    return {"time": r.time.strftime("%Y-%m-%d %H:%M"), "temp": float(r.temp),
+            "humidity": float(r.humidity), "wind": float(r.wind), "feels": float(r.feels)}
+
+
+def fetch_campus(key: str, tries: int = 3) -> dict:
+    last = None
+    for _ in range(tries):
+        try:
+            r = requests.get(config.CAMPUS_GRID_URL, params={
+                "obs": weather.CAMPUS_OBS, "itv": 10,
+                "lon": config.CAMPUS_LON, "lat": config.CAMPUS_LAT, "help": 0, "authKey": key,
+            }, timeout=(15, 45))
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")   # URL에 키가 있으므로 상태 코드만
+            data = parse_latest(r.text)
+            if data is None:
+                raise RuntimeError("최근 1시간 자료가 비어 있음")
+            return {**data, "source": "기상청 고해상도 격자(500m) 실측"}
+        except Exception as e:
+            last = e
+    raise RuntimeError(f"{tries}번 시도 모두 실패: {type(last).__name__} {last}")
+
+
+def fetch_forecast(tries: int = 3) -> dict:
+    last = None
+    for _ in range(tries):
+        try:
+            df = weather.fetch_kma_forecast()
+            break
+        except Exception as e:
+            last = e
+    else:
+        raise RuntimeError(f"단기예보 {tries}번 시도 모두 실패: {last}")
+    out = {
+        "source": "기상청 단기예보",
+        "area": config.APP_REF_NAME,
+        "hourly": [{"date": t.strftime("%Y-%m-%d"), "hour": t.hour, "temp": r.temp, "wind": r.wind,
+                    "humidity": r.humidity, "pop": r.pop}
+                   for t, r in zip(df["time"], df.itertuples(index=False))],
+    }
+    try:
+        now = weather.fetch_kma_now()
+        out["now"] = {"time": now["time"].strftime("%Y-%m-%d %H:%M"), "temp": now["temp"],
+                      "wind": now["wind"], "humidity": now["humidity"], "source": "기상청 초단기실황"}
+    except Exception as e:
+        out["now_error"] = str(e)
+    return out
+
+
+def previous(name: str) -> dict | None:
+    base = os.environ.get("PAGES_URL")
+    if not base:
+        return None
+    try:
+        r = requests.get(f"{base.rstrip('/')}/{name}", timeout=15)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def write(name: str, make, ok_key: str, stamp: str) -> None:
+    """make()로 새 값을 받고, 실패하면 공개된 직전 파일을 유지."""
+    try:
+        data = {**make(), "updated_at": stamp}
+        print(f"{name}: 갱신 성공")
+    except Exception as e:
+        print(f"{name}: 받지 못함 — {e}", file=sys.stderr)
+        data = previous(name)
+        if data and ok_key in data:
+            data["last_error"] = f"{stamp} 갱신 실패"
+            print(f"{name}: 직전 값 유지 (갱신 {data.get('updated_at')})")
+        else:
+            data = {"error": str(e), "updated_at": stamp}
+    DOCS.mkdir(exist_ok=True)
+    (DOCS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def main() -> int:
+    stamp = weather.kst_now().strftime("%Y-%m-%d %H:%M")
+    key = os.environ.get("KMA_APIHUB_KEY", "").strip()
+
+    def campus():
+        if not key:
+            raise RuntimeError("KMA_APIHUB_KEY 비밀값이 없음")
+        return fetch_campus(key)
+
+    def forecast():
+        if not key and not os.environ.get("KMA_API_KEY"):
+            raise RuntimeError("KMA_APIHUB_KEY 비밀값이 없음")
+        return fetch_forecast()
+
+    write("campus_now.json", campus, "feels", stamp)
+    write("forecast.json", forecast, "hourly", stamp)
+
+    for name in ("campus_now.json", "forecast.json"):
+        js = json.loads((DOCS / name).read_text(encoding="utf-8"))
+        if "feels" in js:
+            print(f"  캠퍼스 실측 {js['time']}: 기온 {js['temp']}°C, 습도 {js['humidity']}%, "
+                  f"풍속 {js['wind']}m/s, 체감 {js['feels']}°C")
+        if "hourly" in js:
+            now = js.get("now")
+            print(f"  만안구 예보 {len(js['hourly'])}시간"
+                  + (f", 지금 {now['time']} 기온 {now['temp']}°C" if now else f", 실황 실패: {js.get('now_error')}"))
+    return 0   # 실패해도 사이트 배포는 계속 (직전 값 또는 Open-Meteo·AI 예측으로 표시)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
