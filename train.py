@@ -25,7 +25,7 @@ def main():
         weather = model.synthetic_weather()
         print(f"합성 날씨 {len(weather):,}건 생성")
 
-    rep = model.train(weather, config.KMA_SOURCE_ELEVATION_M, args.model)
+    rep = model.train(weather, args.model)
     print(f"모델: {args.model} | 학습 {rep['n_train']:,}건 (학생 제보 {rep['n_feedback']}건 포함)")
     print(f"정확도(단계 정확히 일치): {rep['accuracy']:.1%}")
     print(f"±1단계 이내 일치:        {rep['within_1']:.1%}")

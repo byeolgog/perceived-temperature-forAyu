@@ -24,11 +24,10 @@ const Standalone = (() => {
     return `${m}월 ${d}일 (${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]})`;
   }
 
-  // ---------- 체감온도 (feels_like.py 와 같은 식) ----------
-  function windChill(t, w) {
-    const v = w * 3.6;
-    if (t > 10 || v < 4.8) return t;
-    const v16 = v ** 0.16;
+  // ---------- 체감온도 (campus_model.py 와 같은 기상청 식) ----------
+  function windChill(t, w) {   // 10~4월: 기온 10°C 이하, 풍속 1.3 m/s 이상일 때만
+    if (t > 10 || w < 1.3) return t;
+    const v16 = (w * 3.6) ** 0.16;
     return 13.12 + 0.6215 * t - 11.37 * v16 + 0.3965 * v16 * t;
   }
   function summerFeels(t, rh) {
@@ -36,18 +35,42 @@ const Standalone = (() => {
       + 0.00391838 * rh ** 1.5 * Math.atan(0.023101 * rh) - 4.686035;
     return -0.2442 + 0.55399 * tw + 0.45535 * t - 0.0022 * tw * tw + 0.00278 * tw * t + 3.0;
   }
-  function feelsLike(t, w, rh) {
-    if (t <= 10) return windChill(t, w);
-    if (t >= 25) return summerFeels(t, rh);
-    return t;
+  function feelsLike(t, w, rh, month) {   // 5~9월 습도 공식, 나머지 바람 공식
+    return month >= 5 && month <= 9 ? summerFeels(t, rh) : windChill(t, w);
   }
-  function campusFeel(t, w, rh, srcElev, sens) {
-    const altitude = -(C.campus_elevation - srcElev) * C.lapse;
-    const ct = t + altitude, cw = w * C.wind_factor;
-    const f = feelsLike(ct, cw, rh);
+
+  // ---------- 캠퍼스 AI 모델 (만안 → 안양대 보정량, 랜덤포레스트 축소판) ----------
+  const CM = M.campus_model;
+  function campusPredict(t, w, rh, month, hour) {
+    const x = [t, rh, w, Math.sin(2 * Math.PI * hour / 24), Math.cos(2 * Math.PI * hour / 24),
+               Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12)];
+    const delta = (trees) => {
+      let sum = 0;
+      for (const tr of trees) {
+        let n = 0;
+        while (tr.f[n] !== -1) n = x[tr.f[n]] <= tr.t[n] ? tr.l[n] : tr.r[n];
+        sum += tr.v[n];
+      }
+      return sum / trees.length;
+    };
+    return { temp: t + delta(CM.trees.uni_ta),
+             humidity: Math.min(100, Math.max(0, rh + delta(CM.trees.uni_hm))),
+             wind: Math.max(0, w + delta(CM.trees.uni_ws)) };
+  }
+  function campusFeel(t, w, rh, month, hour, sens) {
+    const c = campusPredict(t, w, rh, month, hour);
+    const appFeels = feelsLike(t, w, rh, month);
+    const f = feelsLike(c.temp, c.wind, c.humidity, month);
+    const mid = feelsLike(c.temp, w, c.humidity, month);
+    let low = f, high = f;   // 겨울에 풍속이 1.3 m/s 기준선 근처면 범위로
+    if (!(month >= 5 && month <= 9) && c.temp <= 10 && Math.abs(c.wind - 1.3) <= 0.3) {
+      const a = feelsLike(c.temp, 1.6, c.humidity, month), b = feelsLike(c.temp, 1.0, c.humidity, month);
+      low = Math.min(a, b, f); high = Math.max(a, b, f);
+    }
     const s = C.sensitivity[sens] ?? 0;
-    return { app: t, campusTemp: ct, campusWind: cw, feels: f, personal: f + s,
-             altitude, wind: f - feelsLike(ct, w, rh), sens: s };
+    return { app: t, appFeels, campusTemp: c.temp, campusHum: c.humidity, campusWind: c.wind,
+             feels: f, personal: f + s, low: low + s, high: high + s,
+             climate: mid - appFeels, wind: f - mid, sens: s };
   }
 
   // ---------- AI 모델 (Random Forest 추론) ----------
@@ -71,7 +94,7 @@ const Standalone = (() => {
         date, hour: h, temp: +(mean[m - 1] + 4.5 * Math.sin((h - 9) / 24 * 2 * Math.PI)).toFixed(1),
         wind: +(2.5 + 1.5 * Math.sin(h / 24 * 2 * Math.PI)).toFixed(1), humidity: 55, pop: 10 });
     }
-    return { hourly: rows, source: "데모 데이터(오프라인)", elevation: C.default_source_elevation };
+    return { hourly: rows, source: "데모 데이터(오프라인)" };
   }
   async function forecast() {
     if (fc && Date.now() - fc.at < 600000) return fc;
@@ -86,7 +109,7 @@ const Standalone = (() => {
               date: t.slice(0, 10), hour: +t.slice(11, 13), temp: h.temperature_2m[i] ?? 0,
               wind: h.wind_speed_10m[i] ?? 0, humidity: h.relative_humidity_2m[i] ?? 50,
               pop: h.precipitation_probability[i] ?? 0 })),
-             source: "Open-Meteo 예보", elevation: js.elevation ?? C.default_source_elevation };
+             source: "Open-Meteo 예보" };
     } catch (e) {
       fc = demoForecast();
     }
@@ -122,11 +145,13 @@ const Standalone = (() => {
       campus: C.campus,
       now_label: `${dateLabel(now.date)} ${ampm} ${now.hour % 12 || 12}:${String(now.minute).padStart(2, "0")}`,
       app_temp: Math.round(cur.temp), app_label: f.source, source: f.source,
+      app_ref: C.app_ref_name, campus_now: null,
       errors: ["웹 체험판이에요. 서버 없이 브라우저에서 계산하며, 기상청 실데이터·학생 제보 모으기는 로컬 실행 버전에서 지원돼요."],
       schedules: Object.keys(C.schedules), sensitivities: Object.keys(C.sensitivity),
       levels: C.levels.map((l) => ({ level: l.level, name: l.name, items: Object.values(l.categories).flat() })),
       stats: stats(),
-      data: { elevation: C.campus_elevation, wind_factor: C.wind_factor },
+      data: { campus_model: "랜덤포레스트 축소판 · 만안 ↔ 안양대 3년치 학습",
+              campus_obs: "실측값은 서버 버전에서 제공" },
     };
   }
 
@@ -141,8 +166,8 @@ const Standalone = (() => {
     const sensCode = Object.keys(C.sensitivity).indexOf(sensitivity);
     const month = +target.slice(5, 7);
     const hours = sel.map((r) => {
-      const cf = campusFeel(r.temp, r.wind, r.humidity, f.elevation, sensitivity);
-      const x = [cf.campusTemp, cf.campusWind, r.humidity, cf.personal, r.hour, month, sensCode, r.pop];
+      const cf = campusFeel(r.temp, r.wind, r.humidity, month, r.hour, sensitivity);
+      const x = [cf.campusTemp, cf.campusWind, cf.campusHum, cf.personal, r.hour, month, sensCode, r.pop];
       return { hour: r.hour, app: r.temp, wind: r.wind, pop: r.pop, feels: cf.personal, level: predict(x), cf };
     });
 
@@ -163,8 +188,8 @@ const Standalone = (() => {
     else if (cf.wind <= -1) tip = "건물 사이 바람이 강해요. 목을 감싸는 옷이 체감온도를 크게 올려줘요.";
     else tip = "실내 강의실은 따뜻하니 안에 너무 두껍게 입기보다 겉옷으로 조절하세요.";
 
-    const diff = Math.round(cf.app - cf.personal);
-    const head = diff >= 1 ? `날씨앱만 보고 얇게 입으면 후회해요! 언덕 위 캠퍼스는 날씨앱보다 ${diff}° 더 춥게 느껴져요. `
+    const diff = Math.round(cf.appFeels - cf.personal);
+    const head = diff >= 1 ? `날씨앱만 보고 얇게 입으면 후회해요! 캠퍼스는 날씨앱보다 ${diff}° 더 춥게 느껴져요. `
       : diff <= -1 ? `오늘 캠퍼스는 날씨앱보다 ${-diff}° 덜 춥게 느껴져요. ` : "오늘 캠퍼스 체감은 날씨앱과 비슷해요. ";
     const comment = `${head}${worst.hour}시가 체감 ${Math.round(cf.personal)}°로 가장 추우니 ${cats["상의"][0]}에 ${cats["의류 잡화"][0]}까지 챙기세요.`;
 
@@ -180,12 +205,14 @@ const Standalone = (() => {
       source: f.source, errors: [], date_label: dateLabel(target), schedule, end_hour: eh,
       steps: {
         weather: `${Math.round(hours[0].app)}° · ${hours[0].wind.toFixed(1)}m/s`,
-        altitude: sgn(cf.altitude), wind: sgn(cf.wind),
+        campus: sgn(cf.climate), wind: sgn(cf.wind),
         feedback: `${st.total}건 반영`, sensitivity: sgn(cf.sens),
       },
       result: {
-        hour: worst.hour, feels: Math.round(+cf.personal.toFixed(1)), app: Math.round(cf.app), diff,
-        altitude: +cf.altitude.toFixed(1), wind: +cf.wind.toFixed(1), sensitivity: +cf.sens.toFixed(1),
+        hour: worst.hour, feels: Math.round(+cf.personal.toFixed(1)), app: Math.round(cf.appFeels), diff,
+        campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), sensitivity: +cf.sens.toFixed(1),
+        range: Math.round(cf.low) !== Math.round(cf.high) ? [Math.round(cf.low), Math.round(cf.high)] : null,
+        basis: "AI 예측(웹 축소판)",
         level: lv.level, level_name: lv.name,
         categories: Object.entries(cats).map(([name, items]) => ({
           name, emoji: C.category_emoji[name],
