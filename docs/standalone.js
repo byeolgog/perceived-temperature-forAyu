@@ -96,8 +96,22 @@ const Standalone = (() => {
     }
     return { hourly: rows, source: "데모 데이터(오프라인)" };
   }
+  // 한국 시간 "YYYY-MM-DD HH:MM" → 지금부터 몇 시간 전인지
+  const hoursAgo = (s) => (Date.now() - new Date(s.replace(" ", "T") + ":00+09:00")) / 3600000;
+
   async function forecast() {
     if (fc && Date.now() - fc.at < 600000) return fc;
+    // 1) GitHub Actions가 매시간 받은 기상청 만안구 실황·단기예보 (인증키는 GitHub 비밀값에만 있음)
+    try {
+      const js = await (await fetch("forecast.json?t=" + Date.now(), { cache: "no-store" })).json();
+      if (Array.isArray(js.hourly) && js.hourly.length && hoursAgo(js.updated_at) < 6) {
+        fc = { hourly: js.hourly, source: js.source || "기상청 단기예보" };
+        if (js.now && hoursAgo(js.now.time) < 3) fc.now = js.now;
+        fc.at = Date.now();
+        return fc;
+      }
+    } catch (e) { /* 파일 없음(더블클릭 실행 등) → Open-Meteo */ }
+    // 2) Open-Meteo (무료, 키 불필요) → 3) 데모
     try {
       const q = new URLSearchParams({
         latitude: C.app_ref[0], longitude: C.app_ref[1],
@@ -142,8 +156,7 @@ const Standalone = (() => {
   async function campusNow(cur) {
     try {
       const js = await (await fetch("campus_now.json?t=" + Date.now(), { cache: "no-store" })).json();
-      const age = (Date.now() - new Date(js.time.replace(" ", "T") + ":00+09:00")) / 3600000;
-      if (Number.isFinite(js.feels) && age < 6) return {
+      if (Number.isFinite(js.feels) && hoursAgo(js.time) < 6) return {
         feels: Math.round(js.feels), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
         time: js.time.slice(11, 16), kind: "실측" };
     } catch (e) { /* 파일 없음 → AI 예측 */ }
@@ -156,14 +169,17 @@ const Standalone = (() => {
   async function home() {
     const f = await forecast(), now = kstNow();
     const cur = f.hourly.find((r) => r.date === now.date && r.hour === now.hour) || f.hourly[0];
+    const appNow = f.now ? f.now.temp : cur.temp;          // 초단기실황이 있으면 지금 관측 기온
+    const appLabel = f.now ? `${f.now.source || "기상청 초단기실황"} ${f.now.time.slice(11, 16)}` : f.source;
     const ampm = now.hour < 12 ? "오전" : "오후";
     const campus = await campusNow(cur);
     return {
       campus: C.campus,
       now_label: `${dateLabel(now.date)} ${ampm} ${now.hour % 12 || 12}:${String(now.minute).padStart(2, "0")}`,
-      app_temp: Math.round(cur.temp), app_label: f.source, source: f.source,
+      app_temp: Math.round(appNow), app_label: appLabel, source: f.source,
       app_ref: C.app_ref_name, campus_now: campus,
-      errors: ["웹 체험판이에요. 서버 없이 브라우저에서 계산하며, 기상청 예보·학생 제보 모으기는 로컬 실행 버전에서 지원돼요."],
+      errors: [f.source.startsWith("기상청") ? "웹 체험판이에요. 기상청 값은 매시간 갱신되고, 학생 제보 모으기는 로컬 실행 버전에서 지원돼요."
+                                             : `웹 체험판이에요. 기상청 예보 파일이 없어 ${f.source}로 계산하고 있어요.`],
       schedules: Object.keys(C.schedules), sensitivities: Object.keys(C.sensitivity),
       levels: C.levels.map((l) => ({ level: l.level, name: l.name, items: Object.values(l.categories).flat() })),
       stats: stats(),

@@ -11,3 +11,4 @@ __pycache__/
 
 # GitHub Actions가 배포할 때 만드는 파일
 docs/campus_now.json
+docs/forecast.json

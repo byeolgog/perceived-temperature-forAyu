@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import unquote
 
@@ -38,6 +38,11 @@ class Forecast:
 
 
 # ---------------- 기상청 ----------------
+
+def kst_now() -> datetime:
+    """한국 시간 (GitHub Actions 서버처럼 시계가 UTC인 곳에서도 기상청 발표 시각을 맞게 계산)."""
+    return datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
+
 
 def _kma_endpoint():
     """(기본 URL, 인증 파라미터 dict) — 설정된 키 종류에 따라."""
@@ -87,7 +92,7 @@ def _ncst_base(now: datetime):
 
 
 def fetch_kma_forecast() -> pd.DataFrame:
-    items = _kma_call("getVilageFcst", *_vilage_base(datetime.now()))
+    items = _kma_call("getVilageFcst", *_vilage_base(kst_now()))
     keymap = {"TMP": "temp", "WSD": "wind", "REH": "humidity", "POP": "pop"}
     rows = {}
     for it in items:
@@ -100,7 +105,7 @@ def fetch_kma_forecast() -> pd.DataFrame:
 
 
 def fetch_kma_now() -> dict:
-    base_date, base_time = _ncst_base(datetime.now())
+    base_date, base_time = _ncst_base(kst_now())
     items = _kma_call("getUltraSrtNcst", base_date, base_time)
     v = {it["category"]: float(it["obsrValue"]) for it in items}
     return {

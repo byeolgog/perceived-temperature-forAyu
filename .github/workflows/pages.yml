@@ -1,10 +1,11 @@
-# GitHub Pages 배포 + 안양대 캠퍼스 실측값 매시간 갱신
+# GitHub Pages 배포 + 실시간 날씨(안양대 캠퍼스 실측, 기상청 만안구 실황·예보) 매시간 갱신
 #
 # 설정 (처음 한 번):
 #   1) Settings → Secrets and variables → Actions → New repository secret
 #      이름: KMA_APIHUB_KEY / 값: 기상청 API허브 인증키
 #   2) Settings → Pages → Build and deployment → Source: "GitHub Actions"
-# 인증키는 비밀값으로만 쓰이고, 배포되는 파일(docs/campus_now.json)에는 들어가지 않습니다.
+# 인증키는 비밀값으로만 쓰이고, 배포되는 파일(docs/campus_now.json, docs/forecast.json)에는 들어가지 않습니다.
+# API허브에서 '고해상도 격자자료'와 '단기예보' 둘 다 활용신청되어 있어야 합니다.
 name: Pages (캠퍼스 실측 갱신)
 
 on:
@@ -37,14 +38,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 캠퍼스 실측값 받기
+      - name: 실시간 날씨 받기 (캠퍼스 실측 + 만안구 예보)
         env:
           KMA_APIHUB_KEY: ${{ secrets.KMA_APIHUB_KEY }}
         run: |
-          # 실패하면 지금 공개된 값을 유지하려고 이전 파일 주소를 알려 줌
-          export PREVIOUS_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/campus_now.json"
-          pip install --quiet requests
-          python update_campus_now.py
+          # 실패하면 지금 공개된 파일을 유지하려고 사이트 주소를 알려 줌
+          export PAGES_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          pip install --quiet requests pandas
+          python update_live_weather.py
 
       - uses: actions/configure-pages@v5
 
