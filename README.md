@@ -2,6 +2,8 @@
 
 2026 안양대학교 AI 경진대회 (AI26-016, 팀 환전)
 
+**바로 보기: https://byeolgog.github.io/AI_contest/**
+
 날씨앱 예보(안양시 만안구 기준)를 **AI 모델로 안양대 캠퍼스 날씨**로 보정해 체감온도를 계산하고,
 캠퍼스에 머무는 시간대 중 가장 추운 때를 기준으로 **옷차림을 추천**합니다.
 
@@ -19,8 +21,8 @@
 
 **방법 A — Git 사용**
 ```powershell
-git clone https://github.com/HIsabelle/onulchupna.git
-cd onulchupna
+git clone https://github.com/byeolgog/AI_contest.git
+cd AI_contest
 ```
 
 **방법 B — ZIP 다운로드**
@@ -95,7 +97,7 @@ python server.py
    - 비밀값은 저장한 사람도 다시 볼 수 없고, 사이트 파일에는 키가 들어가지 않습니다.
 2. **배포 방식 바꾸기**: Settings → Pages → Build and deployment → Source를 **GitHub Actions**로 선택
 3. **첫 실행**: Actions 탭 → 'Pages (캠퍼스 실측 갱신)' → **Run workflow**
-4. 1~2분 뒤 `https://<아이디>.github.io/<저장소 이름>/` 에서 누구나 접속 가능
+4. 1~2분 뒤 **https://byeolgog.github.io/AI_contest/** 에서 누구나 접속 가능
 
 - 실측값 받기에 실패하면 직전 값을 그대로 두고 다음 시간에 다시 시도합니다. 실측이 6시간 넘게 갱신되지 않으면 화면은 AI 예측으로 바뀝니다.
 - GitHub은 60일 동안 저장소에 변경이 없으면 매시간 실행을 멈춥니다. Actions 탭에서 다시 켤 수 있어요.
