@@ -1,6 +1,6 @@
 """옷차림 분류 모델 (Random Forest / XGBoost).
 
-학습 데이터 = 날씨 데이터(기상청 AWS CSV 또는 합성 데이터)에 캠퍼스 보정을 적용하고
+학습 데이터 = 날씨 데이터(기상청 AWS CSV 또는 합성 데이터)에 캠퍼스 보정(AI 모델)을 적용하고
 '기온별 옷차림 표' 규칙으로 붙인 초기 라벨 + 학생 체감 제보(feedback.csv)로 고친 라벨.
 제보가 쌓일수록 규칙이 아니라 실제 안양대 학생 체감에 맞춰집니다.
 """
@@ -16,19 +16,19 @@ from sklearn.model_selection import train_test_split
 
 import config
 import outfit
-from feels_like import campus_feels_like
+from feels_like import CampusFeel, campus_batch, campus_feels_like
 
 SENS_CODE = {name: i for i, name in enumerate(config.SENSITIVITY_OFFSET)}  # 많이 타요=0, 보통=1, 안 타요=2
 FEATURES = ["campus_temp", "campus_wind", "humidity", "feels", "hour", "month", "sensitivity", "pop"]
 FEEDBACK_WEIGHT = 5.0  # 실제 학생 제보는 합성 라벨보다 5배 중요하게
 
 
-def make_row(temp, wind, humidity, pop, when, sensitivity, source_elev):
-    cf = campus_feels_like(temp, wind, humidity, source_elev, sensitivity)
+def make_row(cf: CampusFeel, pop, when, sensitivity):
+    """캠퍼스 체감 결과 한 시각 → 옷차림 모델 입력."""
     return {
         "campus_temp": cf.campus_temp,
         "campus_wind": cf.campus_wind,
-        "humidity": humidity,
+        "humidity": cf.campus_humidity,
         "feels": cf.personal,
         "hour": when.hour,
         "month": when.month,
@@ -83,13 +83,16 @@ def load_aws_csv(path: str | Path) -> pd.DataFrame:
     return out.dropna()
 
 
-def build_dataset(weather: pd.DataFrame, source_elev: float, seed: int = 0):
+def build_dataset(weather: pd.DataFrame, seed: int = 0):
     """날씨 × 3가지 추위 민감도 → 특성 + 규칙 라벨(사람마다 다른 체감을 노이즈로 반영)."""
     rng = np.random.default_rng(seed)
+    weather = weather.reset_index(drop=True)
+    campus = campus_batch(weather)   # 캠퍼스 AI 예측은 한꺼번에 (한 줄씩 하면 느림)
     rows, labels = [], []
-    for r in weather.itertuples(index=False):
+    for i, r in enumerate(weather.itertuples(index=False)):
         for sens in config.SENSITIVITY_OFFSET:
-            row = make_row(r.temp, r.wind, r.humidity, r.pop, r.time, sens, source_elev)
+            cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time, sens, predicted=campus.iloc[i])
+            row = make_row(cf, r.pop, r.time, sens)
             rows.append(row)
             labels.append(outfit.rule_level(row["feels"] + rng.normal(0, 1.2)))
     X = pd.DataFrame(rows)[FEATURES]
@@ -117,8 +120,8 @@ def make_model(kind: str = "rf"):
     return RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_leaf=3, random_state=0, n_jobs=-1)
 
 
-def train(weather: pd.DataFrame, source_elev: float, kind: str = "rf"):
-    X, y, w = build_dataset(weather, source_elev)
+def train(weather: pd.DataFrame, kind: str = "rf"):
+    X, y, w = build_dataset(weather)
     fb = load_feedback()
     if fb is not None:
         X = pd.concat([X, fb[0]], ignore_index=True)

@@ -1,7 +1,8 @@
 """오늘춥나?? 설정값.
 
-캠퍼스 보정 계수는 '추정값'입니다. 실측(휴대용 온도계·풍속계로 캠퍼스와
-안양 AWS 지점을 동시에 측정)을 하면 아래 숫자만 바꾸면 됩니다.
+캠퍼스 보정은 추정 계수(고도·바람 배율)가 아니라 학습한 AI 모델이 합니다.
+  - 학습 데이터: data/train_data.csv (안양만안 AWS 377 ↔ 안양대 500m 격자, 2023~2025년 시간별)
+  - 모델: python train_campus.py → data/campus_model.joblib
 """
 import os
 from pathlib import Path
@@ -28,27 +29,26 @@ MODEL_PATH = DATA_DIR / "outfit_model.joblib"
 FEEDBACK_PATH = DATA_DIR / "feedback.csv"
 
 # 안양대학교 안양캠퍼스 (경기도 안양시 만안구 삼덕로37번길 22)
+# 500m 격자 학습 데이터를 모은 좌표와 같아야 합니다.
 CAMPUS_NAME = "안양대학교 안양캠퍼스"
-CAMPUS_LAT = 37.3916
-CAMPUS_LON = 126.9195
-CAMPUS_ELEVATION_M = 90.0      # 캠퍼스(언덕 위) 해발고도 추정값 — 실측 후 수정
+CAMPUS_LAT = 37.3921
+CAMPUS_LON = 126.9206
 
-# '일반 날씨 앱' 기준 지점: 안양시청(동안구) — 날씨 앱이 보여주는 온도의 기준
-APP_REF_LAT = 37.3943
-APP_REF_LON = 126.9568
-
-# 기상청 예보 기준 고도 (안양 시가지 평지 추정값) — Open-Meteo는 응답의 격자 고도를 사용
-KMA_SOURCE_ELEVATION_M = 40.0
+# '일반 날씨 앱' 기준 지점: 안양만안 AWS(377) — 모델 학습 입력과 같은 만안구 기준
+APP_REF_NAME = "안양시 만안구"
+APP_REF_LAT = 37.39523
+APP_REF_LON = 126.89194
 
 # 기상청 단기예보 격자 좌표 (안양시 만안구)
 KMA_NX = 59
 KMA_NY = 123
 
-# 기온감률: 고도 100m 올라갈 때마다 약 0.65°C 하강
-LAPSE_RATE_C_PER_M = 0.0065
+# 캠퍼스 AI 모델 (만안 날씨 → 안양대 기온·습도·풍속)
+CAMPUS_TRAIN_PATH = DATA_DIR / "train_data.csv"
+CAMPUS_MODEL_PATH = DATA_DIR / "campus_model.joblib"
 
-# 언덕·건물 사이 바람길 효과: 일반 예보 풍속 대비 캠퍼스 풍속 배율 (추정값)
-CAMPUS_WIND_FACTOR = 1.3
+# 안양대 500m 격자 실시간 값 (기상청 API허브 고해상도 격자 · 특정지점 다중요소, 약 1시간 지연)
+CAMPUS_GRID_URL = "https://apihub.kma.go.kr/api/typ01/url/sfc_nc_var.php"
 
 # "나는 추위를..." 개인 민감도 보정 (°C, 체감온도에 더함)
 SENSITIVITY_OFFSET = {

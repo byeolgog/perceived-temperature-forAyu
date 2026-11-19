@@ -180,21 +180,21 @@
         <div id="notices"></div>
         <div class="loc">📍 <span id="loc">안양대학교 안양캠퍼스</span> · <span id="nowLabel"></span></div>
         <h1>날씨앱은 <span id="heroTemp">–</span>°라는데,<br>캠퍼스도 정말 그럴까?</h1>
-        <p class="lead">언덕과 건물 사이 바람 때문에 캠퍼스는 날씨앱보다 더 추워요.<br>AI가 우리 캠퍼스에 맞춘 진짜 체감온도를 알려드려요.</p>
+        <p class="lead">같은 안양이라도 캠퍼스의 기온·습도·바람은 날씨앱과 달라요.<br>AI가 우리 캠퍼스에 맞춘 진짜 체감온도를 알려드려요.</p>
         <div class="temps">
           <div class="temp-card plain">
             <div class="label">일반 날씨앱</div>
             <div class="big"><span id="appTemp">–</span>°</div>
-            <div class="foot" id="appFoot">안양시 동안구 기준</div>
+            <div class="foot" id="appFoot">안양시 만안구 기준</div>
           </div>
           <div class="temp-card blue" id="campusCard">
             <div class="label">캠퍼스 체감온도</div>
-            <div class="big">??°</div>
-            <div class="foot">오른쪽에서 정보를 입력해 주세요 →</div>
+            <div class="big"><span id="campusNow">??</span>°</div>
+            <div class="foot" id="campusFoot">오른쪽에서 정보를 입력해 주세요 →</div>
           </div>
         </div>
         <div class="features">
-          <div class="feature"><div class="ic">⛰️</div><b>언덕·고도 반영</b><span>캠퍼스 지형 맞춤 보정</span></div>
+          <div class="feature"><div class="ic">🤖</div><b>AI 캠퍼스 보정</b><span>3년치 기상 데이터 학습</span></div>
           <div class="feature"><div class="ic">🙋</div><b>학생 실시간 제보</b><span>지금 캠퍼스 체감 공유</span></div>
           <div class="feature"><div class="ic">🧥</div><b>옷차림 추천</b><span>내 일정에 딱 맞게</span></div>
         </div>
@@ -237,8 +237,8 @@
         <div class="card side-list">
           <h3>AI가 보는 데이터</h3>
           <div class="it"><div class="ic">🌤️</div><div><b>기상청 날씨</b><span id="dSource">기온 · 풍속 · 습도 · 강수확률</span></div></div>
-          <div class="it"><div class="ic">⛰️</div><div><b>캠퍼스 지형</b><span id="dTerrain">고도 · 경사 · 그늘 구역</span></div></div>
-          <div class="it"><div class="ic">🏢</div><div><b>건물 배치</b><span id="dBuilding">건물 사이 바람길</span></div></div>
+          <div class="it"><div class="ic">🤖</div><div><b>캠퍼스 AI 모델</b><span id="dTerrain">만안 ↔ 안양대 날씨 학습</span></div></div>
+          <div class="it"><div class="ic">📡</div><div><b>캠퍼스 실측</b><span id="dBuilding">안양대 500m 격자 (기상청)</span></div></div>
           <div class="it"><div class="ic">🙋</div><div><b>학생 체감 제보</b><span id="dReports">오늘 들어온 제보</span></div></div>
         </div>
         <div class="card">
@@ -393,11 +393,15 @@ async function loadHome() {
   $("nowLabel").textContent = h.now_label;
   $("heroTemp").textContent = h.app_temp;
   $("appTemp").textContent = h.app_temp;
-  $("appFoot").textContent = `${h.app_label} · 안양시 동안구 기준`;
+  $("appFoot").textContent = `${h.app_label} · ${h.app_ref || "안양시 만안구"} 기준`;
+  if (h.campus_now) {   // 안양대 500m 격자 실측 (약 1시간 지연)
+    $("campusNow").textContent = h.campus_now.feels;
+    $("campusFoot").textContent = `${h.campus_now.time} 실측 · 내 일정 예측은 오른쪽에서 →`;
+  }
   $("notices").innerHTML = h.errors.map((e) => `<div class="notice">ℹ️ ${esc(e)}</div>`).join("");
   $("dSource").textContent = `${h.source} · 기온·풍속·습도`;
-  $("dTerrain").textContent = `해발 ${h.data.elevation}m 언덕 위 캠퍼스`;
-  $("dBuilding").textContent = `건물 사이 바람길 · 풍속 ×${h.data.wind_factor}`;
+  $("dTerrain").textContent = h.data.campus_model;
+  $("dBuilding").textContent = h.data.campus_obs;
 
   pills($("dayPills"), ["오늘", "내일"], state.day, (v) => (state.day = v));
   pills($("schedulePills"), h.schedules, state.schedule, (v) => (state.schedule = v),
@@ -414,8 +418,8 @@ async function loadHome() {
 // ---------- 분석 애니메이션 + 결과 ----------
 const STEP_DEFS = [
   ["weather", "기상청 기온·풍속 불러오기"],
-  ["altitude", "캠퍼스 지형 반영 (언덕·고도)"],
-  ["wind", "건물 사이 바람길 분석"],
+  ["campus", "AI가 캠퍼스 기온·습도 예측"],
+  ["wind", "AI가 캠퍼스 바람 예측"],
   ["feedback", "학생 실시간 체감 제보 학습"],
   ["sensitivity", "내 일정·추위 민감도로 맞춤 보정"],
 ];
@@ -458,10 +462,11 @@ function renderResult(d) {
   else if (r.diff < 0) { badge.textContent = `날씨앱보다 ${-r.diff}° 더 따뜻해요`; badge.className = "badge warm"; }
   else { badge.textContent = "날씨앱과 비슷해요"; badge.className = "badge warm"; }
   const fmt = (v) => (v > 0 ? "+" : v < 0 ? "−" : "±") + Math.abs(v).toFixed(1) + "°";
-  $("rWhy").textContent = `날씨앱 ${r.app}° → 언덕·고도 ${fmt(r.altitude)} · 바람 ${fmt(r.wind)} · 민감도 ${fmt(r.sensitivity)}`;
+  $("rWhy").textContent = `날씨앱 체감 ${r.app}° → 캠퍼스 기온·습도 ${fmt(r.campus)} · 바람 ${fmt(r.wind)} · 민감도 ${fmt(r.sensitivity)}`
+    + (r.range ? ` · 바람이 1.3m/s 기준선 근처라 ${r.range[0]}°~${r.range[1]}°까지 느껴질 수 있어요` : "");
   $("rComment").textContent = r.comment;
   $("rTip").textContent = r.tip;
-  $("rBasis").textContent = `근거: ${d.source} · 캠퍼스 지형 · 학생 제보 ${r.feedback_total}건 · ${r.model}`;
+  $("rBasis").textContent = `근거: ${d.source} · 캠퍼스 ${r.basis || "AI 예측"} · 학생 제보 ${r.feedback_total}건 · 옷차림 ${r.model}`;
   $("rLevel").textContent = `· ${r.level_name}`;
   // 카테고리별 칸: 대표 아이템(첫 번째) 크게 + 나머지는 '또는'으로
   $("rOutfits").innerHTML = r.categories.map((c) => {

@@ -6,6 +6,8 @@
      · 초단기실황(getUltraSrtNcst): 지금 이 시각 관측값
   2) Open-Meteo (무료, 키 불필요)
   3) 네트워크가 안 되면 시연용 데모 데이터
+
+캠퍼스 실측: 기상청 API허브 고해상도 격자(500m)로 안양대 위치의 최근 1시간 값 (KMA_APIHUB_KEY 필요)
 """
 from __future__ import annotations
 
@@ -31,7 +33,6 @@ APIHUB = "https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0"
 class Forecast:
     hourly: pd.DataFrame
     source: str
-    source_elevation: float
     now: Optional[dict] = None              # 초단기실황 {temp, wind, humidity, time}
     errors: list = field(default_factory=list)
 
@@ -114,7 +115,7 @@ def fetch_open_meteo():
     resp = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
-            # 캠퍼스가 아니라 '날씨 앱 기준 지점'(동안구) 예보를 받아 캠퍼스로 보정
+            # 캠퍼스가 아니라 '날씨 앱 기준 지점'(만안구) 예보를 받아 AI 모델로 캠퍼스 값 예측
             "latitude": config.APP_REF_LAT, "longitude": config.APP_REF_LON,
             "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability",
             "wind_speed_unit": "ms", "timezone": "Asia/Seoul", "forecast_days": 3,
@@ -131,7 +132,7 @@ def fetch_open_meteo():
         "humidity": h["relative_humidity_2m"],
         "pop": h["precipitation_probability"],
     })
-    return df.fillna(0), float(js.get("elevation", config.KMA_SOURCE_ELEVATION_M))
+    return df.fillna(0)
 
 
 def demo_forecast(start: date) -> pd.DataFrame:
@@ -156,7 +157,7 @@ def get_forecast() -> Forecast:
     errors = []
     if _kma_endpoint()[0]:
         try:
-            fc = Forecast(fetch_kma_forecast(), "기상청 단기예보", config.KMA_SOURCE_ELEVATION_M)
+            fc = Forecast(fetch_kma_forecast(), "기상청 단기예보")
             try:
                 fc.now = fetch_kma_now()
             except Exception as e:
@@ -167,9 +168,49 @@ def get_forecast() -> Forecast:
     else:
         errors.append("기상청 API 키가 없어 Open-Meteo를 사용합니다 (.env에 KMA_API_KEY 설정).")
     try:
-        df, elev = fetch_open_meteo()
-        return Forecast(df, "Open-Meteo 예보", elev, errors=errors)
+        return Forecast(fetch_open_meteo(), "Open-Meteo 예보", errors=errors)
     except Exception as e:
         errors.append(f"Open-Meteo 실패: {e}")
-        return Forecast(demo_forecast(date.today()), "데모 데이터(오프라인)",
-                        config.KMA_SOURCE_ELEVATION_M, errors=errors)
+        return Forecast(demo_forecast(date.today()), "데모 데이터(오프라인)", errors=errors)
+
+
+# ---------------- 안양대 캠퍼스 실측 (500m 격자) ----------------
+
+CAMPUS_OBS = "ta,hm,ws_10m,ta_chi"
+
+
+def parse_grid(text: str) -> pd.DataFrame:
+    """격자 API 텍스트 응답 → time, temp, humidity, wind, feels.
+
+    '#' 주석 줄과 'TM' 요약 줄은 건너뛰고, -999 같은 결측(아주 작은 값)이 있는 줄은 버린다.
+    """
+    rows = []
+    for line in text.splitlines():
+        parts = line.strip().replace(",", " ").split()
+        if len(parts) < 5 or not parts[0].isdigit():
+            continue
+        try:
+            vals = [float(x) for x in parts[1:5]]
+        except ValueError:
+            continue
+        if min(vals) <= -50:
+            continue
+        rows.append([datetime.strptime(parts[0], "%Y%m%d%H%M"), *vals])
+    return pd.DataFrame(rows, columns=["time", "temp", "humidity", "wind", "feels"])
+
+
+def fetch_campus_now() -> dict:
+    """안양대 위치 500m 격자의 최근 1시간 중 가장 최근 정상 값 (약 1시간 지연)."""
+    key = os.environ.get("KMA_APIHUB_KEY", "").strip()
+    if not key:
+        raise RuntimeError("캠퍼스 실측값은 기상청 API허브 키(KMA_APIHUB_KEY)가 있어야 받을 수 있어요")
+    resp = requests.get(config.CAMPUS_GRID_URL, params={
+        "obs": CAMPUS_OBS, "itv": 10, "lon": config.CAMPUS_LON, "lat": config.CAMPUS_LAT,
+        "help": 0, "authKey": key,
+    }, timeout=(10, 30))
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}")   # URL에 키가 있으므로 상태 코드만
+    df = parse_grid(resp.text)
+    if df.empty:
+        raise RuntimeError("최근 1시간 캠퍼스 자료가 비어 있어요")
+    return df.iloc[-1].to_dict()

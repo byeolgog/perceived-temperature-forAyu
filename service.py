@@ -12,8 +12,8 @@ import requests
 import config
 import model
 import outfit
-from feels_like import campus_feels_like
-from weather import get_forecast
+from feels_like import campus_batch, campus_feels_like, model_error
+from weather import fetch_campus_now, get_forecast
 
 WEEKDAYS = "월화수목금토일"
 
@@ -21,7 +21,7 @@ WEEKDAYS = "월화수목금토일"
 def r0(x: float) -> int:
     """사사오입 반올림 (화면 JS의 Math.round 와 같게 — 파이썬 round는 8.5→8)."""
     return math.floor(x + 0.5)
-_cache = {"fc": None, "at": 0.0}
+_cache = {"fc": None, "at": 0.0, "now": None, "now_at": 0.0, "now_err": None}
 _model = {"clf": None, "loaded": False}
 
 
@@ -30,6 +30,17 @@ def forecast():
         _cache["fc"] = get_forecast()
         _cache["at"] = time.time()
     return _cache["fc"]
+
+
+def campus_now():
+    """안양대 500m 격자 최신 실측 (10분 캐시). 키가 없거나 실패하면 None."""
+    if time.time() - _cache["now_at"] > 600:
+        _cache["now_at"] = time.time()
+        try:
+            _cache["now"], _cache["now_err"] = fetch_campus_now(), None
+        except Exception as e:
+            _cache["now"], _cache["now_err"] = None, str(e)
+    return _cache["now"]
 
 
 def clf():
@@ -79,8 +90,8 @@ def save_feedback(worn_level: int, feedback: str, sensitivity: str):
     h = fc.hourly
     idx = (h["time"] - pd.Timestamp(datetime.now())).abs().idxmin()
     r = h.loc[idx]
-    row = model.make_row(r.temp, r.wind, r.humidity, r["pop"], r.time, sensitivity, fc.source_elevation)
-    model.save_feedback(row, worn_level, feedback)
+    cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time, sensitivity)
+    model.save_feedback(model.make_row(cf, r["pop"], r.time, sensitivity), worn_level, feedback)
 
 
 # ---------------- 홈 ----------------
@@ -94,20 +105,35 @@ def home() -> dict:
         h = fc.hourly
         app_now = float(h.loc[(h["time"] - pd.Timestamp(now)).abs().idxmin(), "temp"])
         label = fc.source
+
+    errors = list(fc.errors)
+    if model_error():
+        errors.append(model_error())
+    obs = campus_now()
+    if obs is None and os.environ.get("KMA_APIHUB_KEY") and _cache["now_err"]:
+        errors.append(f"캠퍼스 실측값을 받지 못했어요: {_cache['now_err']}")
+    now_out = None
+    if obs is not None:
+        t = pd.Timestamp(obs["time"])
+        now_out = {"feels": r0(obs["feels"]), "temp": round(obs["temp"], 1),
+                   "wind": round(obs["wind"], 1), "humidity": round(obs["humidity"]),
+                   "time": f"{t:%H:%M}"}
     return {
         "campus": config.CAMPUS_NAME,
         "now_label": korean_datetime(now),
         "app_temp": r0(app_now),
         "app_label": label,
         "source": fc.source,
-        "errors": fc.errors,
+        "errors": errors,
+        "app_ref": config.APP_REF_NAME,
+        "campus_now": now_out,
         "schedules": list(config.SCHEDULE_PRESETS),
         "sensitivities": list(config.SENSITIVITY_OFFSET),
         "levels": [{"level": l.level, "name": l.name, "items": list(l.items)} for l in outfit.LEVELS],
         "stats": feedback_stats(),
         "data": {
-            "elevation": config.CAMPUS_ELEVATION_M,
-            "wind_factor": config.CAMPUS_WIND_FACTOR,
+            "campus_model": "랜덤포레스트 · 만안 ↔ 안양대 3년치(2023~2025) 시간별 학습",
+            "campus_obs": "안양대 500m 격자 실측 (기상청, 약 1시간 지연)",
         },
     }
 
@@ -117,7 +143,7 @@ def home() -> dict:
 def _ai_comment(app_t, feels_t, worst_hour, cats, hourly):
     diff = r0(app_t - feels_t)
     if diff >= 1:
-        head = f"날씨앱만 보고 얇게 입으면 후회해요! 언덕 위 캠퍼스는 날씨앱보다 {diff}° 더 춥게 느껴져요. "
+        head = f"날씨앱만 보고 얇게 입으면 후회해요! 캠퍼스는 날씨앱보다 {diff}° 더 춥게 느껴져요. "
     elif diff <= -1:
         head = f"오늘 캠퍼스는 날씨앱보다 {-diff}° 덜 춥게 느껴져요. "
     else:
@@ -132,7 +158,7 @@ def _ai_comment(app_t, feels_t, worst_hour, cats, hourly):
     try:
         prompt = (
             "너는 안양대 학생에게 옷차림을 알려주는 친근한 도우미야. 존댓말로 2문장 이내.\n"
-            f"날씨앱 기온 {app_t:.1f}°C, 언덕 위 캠퍼스 체감 {feels_t:.1f}°C ({worst_hour}시 가장 추움), "
+            f"날씨앱 체감 {app_t:.1f}°C, 안양대 캠퍼스 체감 {feels_t:.1f}°C ({worst_hour}시 가장 추움), "
             f"시간대별 체감: {[(h['hour'], h['feels']) for h in hourly]}, 추천 옷: {cats}"
         )
         r = requests.post(
@@ -160,10 +186,16 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
         return {"error": "선택한 시간대의 예보가 없어요. 오늘 일정이 이미 끝났다면 '내일'을 선택하세요."}
 
     m = clf()
+    sel = sel.reset_index(drop=True)
+    campus = campus_batch(sel)               # 남은 시각: AI 예측 (한꺼번에)
+    obs = campus_now()                       # 지난 시각: 500m 격자 실측
+    obs_hour = pd.Timestamp(obs["time"]).floor("h") if obs is not None else None
     hours = []
-    for r in sel.itertuples(index=False):
-        cf = campus_feels_like(r.temp, r.wind, r.humidity, fc.source_elevation, sensitivity)
-        row = model.make_row(r.temp, r.wind, r.humidity, r.pop, r.time, sensitivity, fc.source_elevation)
+    for i, r in enumerate(sel.itertuples(index=False)):
+        observed = obs if obs_hour is not None and r.time == obs_hour else None
+        cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time, sensitivity,
+                               observed=observed, predicted=campus.iloc[i])
+        row = model.make_row(cf, r.pop, r.time, sensitivity)
         level, _ = model.predict_level(m, row)
         hours.append({"hour": r.time.hour, "app": r.temp, "wind": r.wind, "pop": r.pop,
                       "feels": cf.personal, "level": level, "cf": cf})
@@ -194,16 +226,18 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
 
     stats = feedback_stats()
     first = hours[0]
+    errors = list(fc.errors) + ([model_error()] if model_error() else [])
+    low, high = cf.feels_low + cf.sensitivity_delta, cf.feels_high + cf.sensitivity_delta
     hourly_out = [{"hour": x["hour"], "app": round(x["app"], 1), "feels": round(x["feels"], 1)} for x in chart]
     return {
         "source": fc.source,
-        "errors": fc.errors,
+        "errors": errors,
         "date_label": f"{target.month}월 {target.day}일 ({WEEKDAYS[target.weekday()]})",
         "schedule": schedule,
         "end_hour": end_h,
         "steps": {
             "weather": f"{first['app']:.0f}° · {first['wind']:.1f}m/s",
-            "altitude": f"{cf.altitude_delta:+.1f}°",
+            "campus": f"{cf.climate_delta:+.1f}°",
             "wind": f"{cf.wind_delta:+.1f}°",
             "feedback": f"{stats['total']}건 반영",
             "sensitivity": f"{cf.sensitivity_delta:+.1f}°",
@@ -211,10 +245,12 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
         "result": {
             "hour": worst["hour"],
             "feels": r0(round(cf.personal, 1)),  # 차트(소수 1자리)와 같은 값에서 반올림
-            "app": r0(cf.app_temp),
-            "diff": r0(cf.app_temp - cf.personal),
-            "altitude": round(cf.altitude_delta, 1),
+            "app": r0(cf.app_feels),
+            "diff": r0(cf.app_feels - cf.personal),
+            "campus": round(cf.climate_delta, 1),
             "wind": round(cf.wind_delta, 1),
+            "range": [r0(low), r0(high)] if r0(low) != r0(high) else None,
+            "basis": cf.source,
             "sensitivity": round(cf.sensitivity_delta, 1),
             "level": lv.level,
             "level_name": lv.name,
@@ -223,7 +259,7 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
                  "items": [{"name": i, "emoji": outfit.ITEM_EMOJI.get(i, "👕")} for i in items]}
                 for c, items in cats.items()
             ],
-            "comment": _ai_comment(cf.app_temp, cf.personal, worst["hour"], cats, hourly_out),
+            "comment": _ai_comment(cf.app_feels, cf.personal, worst["hour"], cats, hourly_out),
             "tip": tip,
             "model": type(m).__name__ if m is not None else "규칙 기반",
             "feedback_total": stats["total"],
