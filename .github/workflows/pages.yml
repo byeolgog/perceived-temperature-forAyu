@@ -1,0 +1,56 @@
+# GitHub Pages 배포 + 안양대 캠퍼스 실측값 매시간 갱신
+#
+# 설정 (처음 한 번):
+#   1) Settings → Secrets and variables → Actions → New repository secret
+#      이름: KMA_APIHUB_KEY / 값: 기상청 API허브 인증키
+#   2) Settings → Pages → Build and deployment → Source: "GitHub Actions"
+# 인증키는 비밀값으로만 쓰이고, 배포되는 파일(docs/campus_now.json)에는 들어가지 않습니다.
+name: Pages (캠퍼스 실측 갱신)
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"   # 매시 17분 (UTC 기준, 시각은 상관없음). GitHub 사정으로 몇 분 늦을 수 있음
+  workflow_dispatch:        # Actions 탭에서 수동 실행
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 캠퍼스 실측값 받기
+        env:
+          KMA_APIHUB_KEY: ${{ secrets.KMA_APIHUB_KEY }}
+        run: |
+          # 실패하면 지금 공개된 값을 유지하려고 이전 파일 주소를 알려 줌
+          export PREVIOUS_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/campus_now.json"
+          pip install --quiet requests
+          python update_campus_now.py
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -112,12 +112,18 @@ def home() -> dict:
     obs = campus_now()
     if obs is None and os.environ.get("KMA_APIHUB_KEY") and _cache["now_err"]:
         errors.append(f"캠퍼스 실측값을 받지 못했어요: {_cache['now_err']}")
-    now_out = None
-    if obs is not None:
+    if obs is not None:   # 안양대 500m 격자 실측 (약 1시간 지연)
         t = pd.Timestamp(obs["time"])
         now_out = {"feels": r0(obs["feels"]), "temp": round(obs["temp"], 1),
                    "wind": round(obs["wind"], 1), "humidity": round(obs["humidity"]),
-                   "time": f"{t:%H:%M}"}
+                   "time": f"{t:%H:%M}", "kind": "실측"}
+    else:                 # 실측이 없으면 지금 시각 예보 → 캠퍼스 AI 예측
+        h = fc.hourly
+        r = h.loc[(h["time"] - pd.Timestamp(now)).abs().idxmin()]
+        cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time)
+        now_out = {"feels": r0(cf.feels), "temp": round(cf.campus_temp, 1),
+                   "wind": round(cf.campus_wind, 1), "humidity": round(cf.campus_humidity),
+                   "time": f"{pd.Timestamp(r.time):%H:%M}", "kind": "AI 예측"}
     return {
         "campus": config.CAMPUS_NAME,
         "now_label": korean_datetime(now),

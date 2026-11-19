@@ -76,12 +76,30 @@ python server.py
 |---|---|---|
 | 날씨 | 기상청(키 있을 때) → Open-Meteo | Open-Meteo |
 | 체감온도 계산 | ✅ | ✅ 같은 계산식 |
+| 캠퍼스 AI 보정 | Random Forest 100그루 × 3 | Random Forest 20그루 × 3 축소판 |
+| 지금 캠퍼스 체감온도 (홈 카드) | 500m 격자 실측(키 있을 때) → 없으면 AI 예측 | GitHub Actions가 매시간 받은 실측 → 없으면 AI 예측 |
 | AI 옷차림 모델 | Random Forest 200그루 | Random Forest 30그루 축소판 (정확도 비슷) |
 | 쇼핑몰 예시 이미지 | 네이버 API 키 있으면 사진 | 검색 링크만 |
 | 학생 체감 제보 | 모두의 제보를 모아 통계·재학습 | 이 기기 브라우저에만 저장 |
 
-**GitHub Pages로 인터넷에 공개하기**: 저장소 Settings → Pages → Branch를 `main`, 폴더를 **`/docs`** 로 저장
-→ 1~2분 뒤 `https://hisabelle.github.io/onulchupna/` 에서 누구나 접속 가능
+### GitHub Pages로 인터넷에 공개하기 (+ 캠퍼스 실측 매시간 갱신)
+
+`.github/workflows/pages.yml`이 main에 올라올 때마다, 그리고 **매시간** 사이트를 배포합니다.
+배포할 때 기상청 API허브에서 안양대 500m 격자 최신값을 받아 `campus_now.json`으로 같이 올려서,
+홈 화면 '지금 캠퍼스 체감온도'에 실측값이 나옵니다.
+
+처음 한 번만 설정하세요.
+
+1. **인증키를 비밀값으로 저장**: Settings → Secrets and variables → Actions → **New repository secret**
+   - Name: `KMA_APIHUB_KEY` / Secret: 기상청 API허브 인증키
+   - 비밀값은 저장한 사람도 다시 볼 수 없고, 사이트 파일에는 키가 들어가지 않습니다.
+2. **배포 방식 바꾸기**: Settings → Pages → Build and deployment → Source를 **GitHub Actions**로 선택
+3. **첫 실행**: Actions 탭 → 'Pages (캠퍼스 실측 갱신)' → **Run workflow**
+4. 1~2분 뒤 `https://<아이디>.github.io/<저장소 이름>/` 에서 누구나 접속 가능
+
+- 실측값 받기에 실패하면 직전 값을 그대로 두고 다음 시간에 다시 시도합니다. 실측이 6시간 넘게 갱신되지 않으면 화면은 AI 예측으로 바뀝니다.
+- GitHub은 60일 동안 저장소에 변경이 없으면 매시간 실행을 멈춥니다. Actions 탭에서 다시 켤 수 있어요.
+- 파일을 더블클릭해서 열 때는 실측 파일을 읽을 수 없어 AI 예측이 나옵니다.
 
 ## API 키 설정 (선택)
 
@@ -122,6 +140,8 @@ python server.py
 | `docs/index.html` | 예선 자료 화면 구상 그대로: 시작 → AI 분석 중 → 결과 (서버·HTML 버전 공용) |
 | `docs/standalone.js` | 서버 없이 브라우저에서 계산하는 HTML 버전 로직 |
 | `docs/model.js` | HTML 버전용 작은 AI 모델 + 설정값 (`python web_export.py`로 생성) |
+| `update_campus_now.py` | 안양대 500m 격자 최신값 → `docs/campus_now.json` (GitHub Actions가 매시간 실행) |
+| `.github/workflows/pages.yml` | GitHub Pages 배포 + 캠퍼스 실측 매시간 갱신 |
 | `web_export.py` | 웹용 모델 내보내기 — `config.py`·`outfit.py`·`train_data.csv`를 고쳤으면 다시 실행 |
 
 ## 사용하는 AI 모델

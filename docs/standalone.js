@@ -136,22 +136,40 @@ const Standalone = (() => {
              pct: Object.fromEntries(choices.map((c) => [c, total ? Math.round(100 * counts[c] / total) : 0])) };
   }
 
+  // ---------- 지금 캠퍼스 체감온도 ----------
+  // GitHub Actions가 매시간 만든 campus_now.json(안양대 500m 격자 실측, 인증키는 GitHub 비밀값에만 있음).
+  // 파일이 없거나(더블클릭 실행 등) 6시간보다 오래됐으면 지금 시각 예보를 AI 모델에 넣어 예측.
+  async function campusNow(cur) {
+    try {
+      const js = await (await fetch("campus_now.json?t=" + Date.now(), { cache: "no-store" })).json();
+      const age = (Date.now() - new Date(js.time.replace(" ", "T") + ":00+09:00")) / 3600000;
+      if (Number.isFinite(js.feels) && age < 6) return {
+        feels: Math.round(js.feels), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
+        time: js.time.slice(11, 16), kind: "실측" };
+    } catch (e) { /* 파일 없음 → AI 예측 */ }
+    const cm = campusFeel(cur.temp, cur.wind, cur.humidity, +cur.date.slice(5, 7), cur.hour, "보통");
+    return { feels: Math.round(cm.feels), temp: +cm.campusTemp.toFixed(1), wind: +cm.campusWind.toFixed(1),
+             humidity: Math.round(cm.campusHum), time: `${String(cur.hour).padStart(2, "0")}:00`, kind: "AI 예측" };
+  }
+
   // ---------- service.py 와 같은 응답 ----------
   async function home() {
     const f = await forecast(), now = kstNow();
     const cur = f.hourly.find((r) => r.date === now.date && r.hour === now.hour) || f.hourly[0];
     const ampm = now.hour < 12 ? "오전" : "오후";
+    const campus = await campusNow(cur);
     return {
       campus: C.campus,
       now_label: `${dateLabel(now.date)} ${ampm} ${now.hour % 12 || 12}:${String(now.minute).padStart(2, "0")}`,
       app_temp: Math.round(cur.temp), app_label: f.source, source: f.source,
-      app_ref: C.app_ref_name, campus_now: null,
-      errors: ["웹 체험판이에요. 서버 없이 브라우저에서 계산하며, 기상청 실데이터·학생 제보 모으기는 로컬 실행 버전에서 지원돼요."],
+      app_ref: C.app_ref_name, campus_now: campus,
+      errors: ["웹 체험판이에요. 서버 없이 브라우저에서 계산하며, 기상청 예보·학생 제보 모으기는 로컬 실행 버전에서 지원돼요."],
       schedules: Object.keys(C.schedules), sensitivities: Object.keys(C.sensitivity),
       levels: C.levels.map((l) => ({ level: l.level, name: l.name, items: Object.values(l.categories).flat() })),
       stats: stats(),
       data: { campus_model: "랜덤포레스트 축소판 · 만안 ↔ 안양대 3년치 학습",
-              campus_obs: "실측값은 서버 버전에서 제공" },
+              campus_obs: campus.kind === "실측" ? "안양대 500m 격자 실측 (기상청, 매시간 갱신)"
+                                                 : "실측 파일이 없어 지금 시각 AI 예측" },
     };
   }
 
