@@ -348,6 +348,7 @@ const api = {
 };
 
 const $ = (id) => document.getElementById(id);
+const f1 = (v) => (Math.abs(v) < 0.05 ? 0 : +v).toFixed(1);   // 소수 첫째 자리 (−0.0 방지)
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const state = { day: "오늘", schedule: null, sensitivity: null, feedback: "추워요", home: null, result: null };
 
@@ -403,7 +404,7 @@ async function loadHome() {
   $("appFoot").textContent = `${h.app_label} · ${h.app_ref || "안양시 만안구"} 기준`;
   if (h.campus_now) {   // 안양대 500m 격자 실측(약 1시간 지연) 또는 지금 시각 AI 예측
     const c = h.campus_now;
-    $("campusNow").textContent = c.feels;
+    $("campusNow").textContent = f1(c.feels);
     $("campusFoot").textContent = `${c.time} ${c.kind} · 기온 ${c.temp}° 바람 ${c.wind}m/s · 내 일정은 오른쪽에서 →`;
   }
   $("notices").innerHTML = h.errors.map((e) => `<div class="notice">ℹ️ ${esc(e)}</div>`).join("");
@@ -472,7 +473,7 @@ function renderNotice(d) {
       : state.day !== "오늘"
       ? `<b>내일 예측에는 오늘 실측이 반영되지 않아요.</b> 실측 효과는 6시간 정도만 이어져서, 내일은 예보 + AI 기본 정확도(±1°C 안에 맞을 확률 약 72%)예요. 내일 아침에 다시 확인하면 더 정확해요.`
       : `<b>아직 반영된 오늘 실측이 없어요.</b> 지금은 예보 + AI 기본 정확도(±1°C 안에 맞을 확률 약 72%)예요.`,
-    `<b>매시간 20분쯤 새로 바로잡혀요.</b> 캠퍼스 실측은 약 1시간 늦게 나와서 늘 한 시간 전 값이 반영돼요. 아침에 한 번 보기보다 <b>나가기 1~3시간 전에 다시 확인</b>하면 더 정확해요.`,
+    `<b>60분마다(매시 50분쯤) 새로 바로잡혀요.</b> 캠퍼스 실측은 약 1시간 늦게 나와서 늘 한 시간 전 값이 반영돼요. 아침에 한 번 보기보다 <b>나가기 1~3시간 전에 다시 확인</b>하면 더 정확해요.`,
     `<b>겨울은 정확도가 낮아요</b>(±1°C 약 65%). 바람이 1.3m/s 기준선을 넘나들면 기상청 공식상 체감온도가 2°C 가까이 달라져, 그럴 땐 범위로 보여드려요.`,
   ];
   $("rNotice").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
@@ -481,13 +482,13 @@ function renderNotice(d) {
 function renderResult(d) {
   const r = d.result;
   $("rLabel").textContent = `안양대 캠퍼스 체감온도 · ${d.date_label} ${r.hour}시`;
-  $("rFeels").textContent = r.feels;
+  $("rFeels").textContent = f1(r.feels);
   const badge = $("rBadge");
   if (r.diff > 0) { badge.textContent = `날씨앱보다 ${r.diff}° 더 추워요`; badge.className = "badge"; }
   else if (r.diff < 0) { badge.textContent = `날씨앱보다 ${-r.diff}° 더 따뜻해요`; badge.className = "badge warm"; }
   else { badge.textContent = "날씨앱과 비슷해요"; badge.className = "badge warm"; }
   const fmt = (v) => (v > 0 ? "+" : v < 0 ? "−" : "±") + Math.abs(v).toFixed(1) + "°";
-  $("rWhy").textContent = `날씨앱 체감 ${r.app}° → 캠퍼스 기온·습도 ${fmt(r.campus)} · 바람 ${fmt(r.wind)}`
+  $("rWhy").textContent = `날씨앱 체감 ${f1(r.app)}° → 캠퍼스 기온·습도 ${fmt(r.campus)} · 바람 ${fmt(r.wind)}`
     + (r.nowcast ? ` · 오늘 실측 반영 ${fmt(r.nowcast)}` : "") + ` · 민감도 ${fmt(r.sensitivity)}`
     + (r.range ? ` · 바람이 1.3m/s 기준선 근처라 ${r.range[0]}°~${r.range[1]}°까지 느껴질 수 있어요` : "");
   $("rComment").textContent = r.comment;
@@ -511,7 +512,7 @@ function renderResult(d) {
     return t < 0.2 ? "var(--navy-2)" : t < 0.55 ? "var(--blue)" : "var(--blue-3)";
   };
   $("chart").innerHTML = d.hourly.map((h) =>
-    `<div class="col"><div class="v">${Math.round(h.feels)}°</div>
+    `<div class="col"><div class="v">${f1(h.feels)}°</div>
        <div class="b" style="height:0;background:${shade(h.feels)}" data-h="${30 + ((h.feels - lo) / span) * 120}"></div></div>`).join("");
   $("xlabels").innerHTML = d.hourly.map((h) => `<span>${h.hour}시</span>`).join("");
   requestAnimationFrame(() => document.querySelectorAll("#chart .b").forEach((b) => (b.style.height = b.dataset.h + "px")));

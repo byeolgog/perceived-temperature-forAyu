@@ -186,10 +186,10 @@ const Standalone = (() => {
   async function campusNow(cur) {
     const js = await liveCampus();
     if (js && Number.isFinite(js.feels) && hoursAgo(js.time) < 6) return {
-      feels: Math.round(js.feels), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
+      feels: +js.feels.toFixed(1), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
       time: js.time.slice(11, 16), kind: "실측" };
     const cm = campusFeel(cur.temp, cur.wind, cur.humidity, +cur.date.slice(5, 7), cur.hour, "보통");
-    return { feels: Math.round(cm.feels), temp: +cm.campusTemp.toFixed(1), wind: +cm.campusWind.toFixed(1),
+    return { feels: +cm.feels.toFixed(1), temp: +cm.campusTemp.toFixed(1), wind: +cm.campusWind.toFixed(1),
              humidity: Math.round(cm.campusHum), time: `${String(cur.hour).padStart(2, "0")}:00`, kind: "AI 예측" };
   }
 
@@ -273,7 +273,7 @@ const Standalone = (() => {
         feedback: `${st.total}건 반영`, sensitivity: sgn(cf.sens),
       },
       result: {
-        hour: worst.hour, feels: Math.round(+cf.personal.toFixed(1)), app: Math.round(cf.appFeels), diff,
+        hour: worst.hour, feels: +cf.personal.toFixed(1), app: +cf.appFeels.toFixed(1), diff,
         campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), nowcast: +cf.nowcast.toFixed(1), sensitivity: +cf.sens.toFixed(1),
         range: Math.round(cf.low) !== Math.round(cf.high) ? [Math.round(cf.low), Math.round(cf.high)] : null,
         nowcast_hour: err && nowcastWeight(err, target, sel[0].hour) >= 0.05 ? err.hour : null,
