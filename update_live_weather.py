@@ -1,6 +1,7 @@
 """실시간 날씨 파일 만들기 (GitHub Actions가 매시간 실행 → GitHub Pages와 함께 배포).
 
   docs/campus_now.json : 안양대 500m 격자 최신 실측 (기온·습도·풍속·체감온도)
+                         + nowcast: 정시 실측과 그 시각 만안구 예보 (오늘 실측 반영용)
   docs/forecast.json   : 기상청 만안구 초단기실황(지금 기온) + 단기예보(시간별, 약 3일)
 
 HTML 버전(GitHub Pages)이 이 파일들을 읽어, 인증키 없이도 기상청 값으로 화면을 그린다.
@@ -25,13 +26,31 @@ DOCS = config.BASE_DIR / "docs"
 
 
 def parse_latest(text: str) -> dict | None:
-    """격자 API 텍스트 응답에서 가장 최근 정상 줄 (tm, ta, hm, ws_10m, ta_chi)."""
+    """격자 API 텍스트 응답에서 가장 최근 정상 줄 (tm, ta, hm, ws_10m, ta_chi) + 최근 정시 값."""
     df = weather.parse_grid(text)
     if df.empty:
         return None
     r = df.iloc[-1]
     return {"time": r.time.strftime("%Y-%m-%d %H:%M"), "temp": float(r.temp),
-            "humidity": float(r.humidity), "wind": float(r.wind), "feels": float(r.feels)}
+            "humidity": float(r.humidity), "wind": float(r.wind), "feels": float(r.feels),
+            "_hour_obs": weather.hour_obs(df)}
+
+
+def add_nowcast(data: dict) -> dict:
+    """정시 실측 시각의 만안구 예보를 붙인다. 실패해도 실측값은 그대로 (보정만 생략)."""
+    obs = data.pop("_hour_obs", None)
+    for _ in range(3):
+        try:
+            ref = weather.nowcast_ref(obs)
+            if ref:
+                data["nowcast"] = ref
+            else:
+                data["nowcast_error"] = "최근 1시간에 정시 실측이 없음"
+            return data
+        except Exception as e:
+            last = e
+    data["nowcast_error"] = f"그 시각 예보를 받지 못함: {last}"
+    return data
 
 
 def fetch_campus(key: str, tries: int = 3) -> dict:
@@ -47,7 +66,7 @@ def fetch_campus(key: str, tries: int = 3) -> dict:
             data = parse_latest(r.text)
             if data is None:
                 raise RuntimeError("최근 1시간 자료가 비어 있음")
-            return {**data, "source": "기상청 고해상도 격자(500m) 실측"}
+            return add_nowcast({**data, "source": "기상청 고해상도 격자(500m) 실측"})
         except Exception as e:
             last = e
     raise RuntimeError(f"{tries}번 시도 모두 실패: {type(last).__name__} {last}")
@@ -129,6 +148,11 @@ def main() -> int:
         if "feels" in js:
             print(f"  캠퍼스 실측 {js['time']}: 기온 {js['temp']}°C, 습도 {js['humidity']}%, "
                   f"풍속 {js['wind']}m/s, 체감 {js['feels']}°C")
+            nc = js.get("nowcast")
+            if nc:
+                print(f"  실측 반영 기준 {nc['time']}: 실측 {nc['obs']} / 예보({nc['fcst_base']} 발표) {nc['fcst']}")
+            else:
+                print(f"  실측 반영 없음: {js.get('nowcast_error')}")
         if "hourly" in js:
             now = js.get("now")
             print(f"  만안구 예보 {len(js['hourly'])}시간"

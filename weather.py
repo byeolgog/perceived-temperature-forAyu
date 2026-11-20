@@ -104,6 +104,23 @@ def fetch_kma_forecast() -> pd.DataFrame:
     return df[COLUMNS].dropna()
 
 
+def fetch_kma_at(when: datetime) -> dict:
+    """그 시각(when, 정시)에 사이트가 쓰고 있던 만안구 예보값 {temp, wind, humidity, base}.
+
+    when 시점에 받을 수 있었던 가장 최근 단기예보 발표분을 다시 조회한다.
+    '오늘 실측 반영'에서 AI 오차(실측 − 예보로 한 예측)를 계산할 때 쓴다.
+    """
+    base_date, base_time = _vilage_base(when)
+    items = _kma_call("getVilageFcst", base_date, base_time)
+    want = (when.strftime("%Y%m%d"), when.strftime("%H00"))
+    keymap = {"TMP": "temp", "WSD": "wind", "REH": "humidity"}
+    v = {keymap[it["category"]]: float(it["fcstValue"]) for it in items
+         if it["category"] in keymap and (it["fcstDate"], it["fcstTime"]) == want}
+    if len(v) < 3:
+        raise RuntimeError(f"{when:%m-%d %H}시 예보가 {base_date} {base_time} 발표분에 없음")
+    return {**v, "base": f"{base_date} {base_time}"}
+
+
 def fetch_kma_now() -> dict:
     base_date, base_time = _ncst_base(kst_now())
     items = _kma_call("getUltraSrtNcst", base_date, base_time)
@@ -218,4 +235,26 @@ def fetch_campus_now() -> dict:
     df = parse_grid(resp.text)
     if df.empty:
         raise RuntimeError("최근 1시간 캠퍼스 자료가 비어 있어요")
-    return df.iloc[-1].to_dict()
+    out = df.iloc[-1].to_dict()
+    out["hour_obs"] = hour_obs(df)
+    return out
+
+
+def hour_obs(df: pd.DataFrame) -> dict | None:
+    """격자 자료 중 가장 최근 정시(HH:00) 값 — 학습 자료(시간별)와 같은 기준."""
+    on_hour = df[df["time"].dt.minute == 0]
+    if on_hour.empty:
+        return None
+    r = on_hour.iloc[-1]
+    return {"time": r.time, "temp": float(r.temp), "humidity": float(r.humidity), "wind": float(r.wind)}
+
+
+def nowcast_ref(obs_hour: dict | None) -> dict | None:
+    """오늘 실측 반영용 기준: 정시 실측 + 그 시각 만안구 예보. 예보를 못 받으면 None."""
+    if not obs_hour:
+        return None
+    t = pd.Timestamp(obs_hour["time"]).to_pydatetime()
+    fc = fetch_kma_at(t)
+    return {"time": t.strftime("%Y-%m-%d %H:%M"),
+            "obs": {k: obs_hour[k] for k in ("temp", "humidity", "wind")},
+            "fcst": {k: fc[k] for k in ("temp", "humidity", "wind")}, "fcst_base": fc["base"]}
