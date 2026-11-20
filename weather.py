@@ -241,12 +241,28 @@ def fetch_campus_now() -> dict:
 
 
 def hour_obs(df: pd.DataFrame) -> dict | None:
-    """격자 자료 중 가장 최근 정시(HH:00) 값 — 학습 자료(시간별)와 같은 기준."""
-    on_hour = df[df["time"].dt.minute == 0]
-    if on_hour.empty:
+    """격자 자료 중 가장 최근 정시(HH:00) 값 — 학습 자료(시간별)와 같은 기준.
+
+    10분 간격 자료가 조회 시각에 맞춰 :05, :15 … 처럼 정시를 비켜 오기도 하므로,
+    정시 값이 없으면 바로 앞뒤 값(정시 ±10분 안)을 시간 비율로 이어서 정시 값을 만든다.
+    """
+    if df.empty:
         return None
-    r = on_hour.iloc[-1]
-    return {"time": r.time, "temp": float(r.temp), "humidity": float(r.humidity), "wind": float(r.wind)}
+    d = df.sort_values("time").reset_index(drop=True)
+    cols = ("temp", "humidity", "wind")
+    for h in sorted(d["time"].dt.floor("h").unique(), reverse=True):
+        h = pd.Timestamp(h)
+        exact = d[d["time"] == h]
+        if not exact.empty:
+            r = exact.iloc[-1]
+            return {"time": h, **{c: float(r[c]) for c in cols}}
+        before = d[(d["time"] < h) & (d["time"] >= h - pd.Timedelta(minutes=10))]
+        after = d[(d["time"] > h) & (d["time"] <= h + pd.Timedelta(minutes=10))]
+        if not before.empty and not after.empty:
+            a, b = before.iloc[-1], after.iloc[0]
+            k = (h - a.time) / (b.time - a.time)
+            return {"time": h, **{c: float(a[c] + k * (b[c] - a[c])) for c in cols}}
+    return None
 
 
 def nowcast_ref(obs_hour: dict | None) -> dict | None:
