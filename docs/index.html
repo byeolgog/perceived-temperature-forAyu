@@ -421,6 +421,7 @@ const STEP_DEFS = [
   ["weather", "기상청 기온·풍속 불러오기"],
   ["campus", "AI가 캠퍼스 기온·습도 예측"],
   ["wind", "AI가 캠퍼스 바람 예측"],
+  ["nowcast", "오늘 캠퍼스 실측 반영"],
   ["feedback", "학생 실시간 체감 제보 학습"],
   ["sensitivity", "내 일정·추위 민감도로 맞춤 보정"],
 ];
@@ -463,7 +464,8 @@ function renderResult(d) {
   else if (r.diff < 0) { badge.textContent = `날씨앱보다 ${-r.diff}° 더 따뜻해요`; badge.className = "badge warm"; }
   else { badge.textContent = "날씨앱과 비슷해요"; badge.className = "badge warm"; }
   const fmt = (v) => (v > 0 ? "+" : v < 0 ? "−" : "±") + Math.abs(v).toFixed(1) + "°";
-  $("rWhy").textContent = `날씨앱 체감 ${r.app}° → 캠퍼스 기온·습도 ${fmt(r.campus)} · 바람 ${fmt(r.wind)} · 민감도 ${fmt(r.sensitivity)}`
+  $("rWhy").textContent = `날씨앱 체감 ${r.app}° → 캠퍼스 기온·습도 ${fmt(r.campus)} · 바람 ${fmt(r.wind)}`
+    + (r.nowcast ? ` · 오늘 실측 반영 ${fmt(r.nowcast)}` : "") + ` · 민감도 ${fmt(r.sensitivity)}`
     + (r.range ? ` · 바람이 1.3m/s 기준선 근처라 ${r.range[0]}°~${r.range[1]}°까지 느껴질 수 있어요` : "");
   $("rComment").textContent = r.comment;
   $("rTip").textContent = r.tip;

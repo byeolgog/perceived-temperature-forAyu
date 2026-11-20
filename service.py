@@ -13,7 +13,7 @@ import config
 import model
 import outfit
 from feels_like import campus_batch, campus_feels_like, model_error
-from weather import fetch_campus_now, get_forecast
+from weather import fetch_campus_now, get_forecast, nowcast_ref
 
 WEEKDAYS = "월화수목금토일"
 
@@ -21,7 +21,7 @@ WEEKDAYS = "월화수목금토일"
 def r0(x: float) -> int:
     """사사오입 반올림 (화면 JS의 Math.round 와 같게 — 파이썬 round는 8.5→8)."""
     return math.floor(x + 0.5)
-_cache = {"fc": None, "at": 0.0, "now": None, "now_at": 0.0, "now_err": None}
+_cache = {"fc": None, "at": 0.0, "now": None, "now_at": 0.0, "now_err": None, "nowcast": None}
 _model = {"clf": None, "loaded": False}
 
 
@@ -40,6 +40,10 @@ def campus_now():
             _cache["now"], _cache["now_err"] = fetch_campus_now(), None
         except Exception as e:
             _cache["now"], _cache["now_err"] = None, str(e)
+        try:   # 오늘 실측 반영 기준 (정시 실측 + 그 시각 예보)
+            _cache["nowcast"] = nowcast_ref(_cache["now"]["hour_obs"]) if _cache["now"] else None
+        except Exception:
+            _cache["nowcast"] = None
     return _cache["now"]
 
 
@@ -193,8 +197,8 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
 
     m = clf()
     sel = sel.reset_index(drop=True)
-    campus = campus_batch(sel)               # 남은 시각: AI 예측 (한꺼번에)
     obs = campus_now()                       # 지난 시각: 500m 격자 실측
+    campus = campus_batch(sel, _cache["nowcast"])   # 남은 시각: AI 예측 + 오늘 실측 반영
     obs_hour = pd.Timestamp(obs["time"]).floor("h") if obs is not None else None
     hours = []
     for i, r in enumerate(sel.itertuples(index=False)):
@@ -245,6 +249,8 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
             "weather": f"{first['app']:.0f}° · {first['wind']:.1f}m/s",
             "campus": f"{cf.climate_delta:+.1f}°",
             "wind": f"{cf.wind_delta:+.1f}°",
+            "nowcast": (f"{pd.Timestamp(_cache['nowcast']['time']):%H}시 실측 {cf.nowcast_delta:+.1f}°"
+                        if _cache["nowcast"] else "실측 없음"),
             "feedback": f"{stats['total']}건 반영",
             "sensitivity": f"{cf.sensitivity_delta:+.1f}°",
         },
@@ -255,6 +261,7 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
             "diff": r0(cf.app_feels - cf.personal),
             "campus": round(cf.climate_delta, 1),
             "wind": round(cf.wind_delta, 1),
+            "nowcast": round(cf.nowcast_delta, 1),
             "range": [r0(low), r0(high)] if r0(low) != r0(high) else None,
             "basis": cf.source,
             "sensitivity": round(cf.sensitivity_delta, 1),

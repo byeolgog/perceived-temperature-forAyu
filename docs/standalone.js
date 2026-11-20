@@ -57,20 +57,41 @@ const Standalone = (() => {
              humidity: Math.min(100, Math.max(0, rh + delta(CM.trees.uni_hm))),
              wind: Math.max(0, w + delta(CM.trees.uni_ws)) };
   }
-  function campusFeel(t, w, rh, month, hour, sens) {
-    const c = campusPredict(t, w, rh, month, hour);
+  // 오늘 실측 반영: 최근 정시 실측 − (그 시각 예보 → AI 예측). 예보가 빗나간 만큼과 AI가 빗나간 만큼이
+  // 함께 잡히고, 몇 시간 동안 같은 방향으로 이어지므로 exp(−경과시간/4시간)으로 줄여서 더한다.
+  // (2025년 검증: ±1°C 정답률 1시간 뒤 72.0 → 78.9%, 3시간 뒤 74.6%, 6시간 뒤 거의 원래대로)
+  const NOWCAST_TAU = 4;
+  function nowcastError(nc) {
+    if (!nc || !nc.obs || !nc.fcst || hoursAgo(nc.time) > 12) return null;
+    const date = nc.time.slice(0, 10), hour = +nc.time.slice(11, 13);
+    const p = campusPredict(nc.fcst.temp, nc.fcst.wind, nc.fcst.humidity, +date.slice(5, 7), hour);
+    return { date, hour, temp: nc.obs.temp - p.temp, humidity: nc.obs.humidity - p.humidity,
+             wind: nc.obs.wind - p.wind };
+  }
+  function nowcastWeight(err, date, hour) {
+    if (!err) return 0;
+    const lead = (Date.parse(date + "T00:00:00Z") - Date.parse(err.date + "T00:00:00Z")) / 3600000 + hour - err.hour;
+    return Math.exp(-Math.max(0, lead) / NOWCAST_TAU);
+  }
+  function campusFeel(t, w, rh, month, hour, sens, err = null, date = null) {
+    const b = campusPredict(t, w, rh, month, hour);              // 반영 전 AI 예측
+    const k = err && date ? nowcastWeight(err, date, hour) : 0;   // 오늘 실측 반영 가중치
+    const c = k ? { temp: b.temp + k * err.temp,
+                    humidity: Math.min(100, Math.max(0, b.humidity + k * err.humidity)),
+                    wind: Math.max(0, b.wind + k * err.wind) } : b;
     const appFeels = feelsLike(t, w, rh, month);
     const f = feelsLike(c.temp, c.wind, c.humidity, month);
-    const mid = feelsLike(c.temp, w, c.humidity, month);
+    const base = feelsLike(b.temp, b.wind, b.humidity, month);
+    const mid = feelsLike(b.temp, w, b.humidity, month);
     let low = f, high = f;   // 겨울에 풍속이 1.3 m/s 기준선 근처면 범위로
     if (!(month >= 5 && month <= 9) && c.temp <= 10 && Math.abs(c.wind - 1.3) <= 0.3) {
-      const a = feelsLike(c.temp, 1.6, c.humidity, month), b = feelsLike(c.temp, 1.0, c.humidity, month);
-      low = Math.min(a, b, f); high = Math.max(a, b, f);
+      const a = feelsLike(c.temp, 1.6, c.humidity, month), bb = feelsLike(c.temp, 1.0, c.humidity, month);
+      low = Math.min(a, bb, f); high = Math.max(a, bb, f);
     }
     const s = C.sensitivity[sens] ?? 0;
     return { app: t, appFeels, campusTemp: c.temp, campusHum: c.humidity, campusWind: c.wind,
              feels: f, personal: f + s, low: low + s, high: high + s,
-             climate: mid - appFeels, wind: f - mid, sens: s };
+             climate: mid - appFeels, wind: base - mid, nowcast: f - base, nowcastW: k, sens: s };
   }
 
   // ---------- AI 모델 (Random Forest 추론) ----------
@@ -153,13 +174,20 @@ const Standalone = (() => {
   // ---------- 지금 캠퍼스 체감온도 ----------
   // GitHub Actions가 매시간 만든 campus_now.json(안양대 500m 격자 실측, 인증키는 GitHub 비밀값에만 있음).
   // 파일이 없거나(더블클릭 실행 등) 6시간보다 오래됐으면 지금 시각 예보를 AI 모델에 넣어 예측.
+  let live = null;   // campus_now.json (10분 캐시)
+  async function liveCampus() {
+    if (live && Date.now() - live.at < 600000) return live.js;
+    let js = null;
+    try { js = await (await fetch("campus_now.json?t=" + Date.now(), { cache: "no-store" })).json(); }
+    catch (e) { /* 파일 없음(더블클릭 실행 등) */ }
+    live = { js, at: Date.now() };
+    return js;
+  }
   async function campusNow(cur) {
-    try {
-      const js = await (await fetch("campus_now.json?t=" + Date.now(), { cache: "no-store" })).json();
-      if (Number.isFinite(js.feels) && hoursAgo(js.time) < 6) return {
-        feels: Math.round(js.feels), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
-        time: js.time.slice(11, 16), kind: "실측" };
-    } catch (e) { /* 파일 없음 → AI 예측 */ }
+    const js = await liveCampus();
+    if (js && Number.isFinite(js.feels) && hoursAgo(js.time) < 6) return {
+      feels: Math.round(js.feels), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
+      time: js.time.slice(11, 16), kind: "실측" };
     const cm = campusFeel(cur.temp, cur.wind, cur.humidity, +cur.date.slice(5, 7), cur.hour, "보통");
     return { feels: Math.round(cm.feels), temp: +cm.campusTemp.toFixed(1), wind: +cm.campusWind.toFixed(1),
              humidity: Math.round(cm.campusHum), time: `${String(cur.hour).padStart(2, "0")}:00`, kind: "AI 예측" };
@@ -199,8 +227,9 @@ const Standalone = (() => {
 
     const sensCode = Object.keys(C.sensitivity).indexOf(sensitivity);
     const month = +target.slice(5, 7);
+    const err = f.source.startsWith("기상청") ? nowcastError((await liveCampus())?.nowcast) : null;
     const hours = sel.map((r) => {
-      const cf = campusFeel(r.temp, r.wind, r.humidity, month, r.hour, sensitivity);
+      const cf = campusFeel(r.temp, r.wind, r.humidity, month, r.hour, sensitivity, err, target);
       const x = [cf.campusTemp, cf.campusWind, cf.campusHum, cf.personal, r.hour, month, sensCode, r.pop];
       return { hour: r.hour, app: r.temp, wind: r.wind, pop: r.pop, feels: cf.personal, level: predict(x), cf };
     });
@@ -240,13 +269,14 @@ const Standalone = (() => {
       steps: {
         weather: `${Math.round(hours[0].app)}° · ${hours[0].wind.toFixed(1)}m/s`,
         campus: sgn(cf.climate), wind: sgn(cf.wind),
+        nowcast: err ? `${err.hour}시 실측 ${sgn(cf.nowcast)}` : "실측 없음",
         feedback: `${st.total}건 반영`, sensitivity: sgn(cf.sens),
       },
       result: {
         hour: worst.hour, feels: Math.round(+cf.personal.toFixed(1)), app: Math.round(cf.appFeels), diff,
-        campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), sensitivity: +cf.sens.toFixed(1),
+        campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), nowcast: +cf.nowcast.toFixed(1), sensitivity: +cf.sens.toFixed(1),
         range: Math.round(cf.low) !== Math.round(cf.high) ? [Math.round(cf.low), Math.round(cf.high)] : null,
-        basis: "AI 예측(웹 축소판)",
+        basis: cf.nowcastW >= 0.05 ? "AI 예측(웹 축소판) + 오늘 실측 반영" : "AI 예측(웹 축소판)",
         level: lv.level, level_name: lv.name,
         categories: Object.entries(cats).map(([name, items]) => ({
           name, emoji: C.category_emoji[name],

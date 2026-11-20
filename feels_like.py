@@ -4,11 +4,16 @@
 - 캠퍼스 보정은 고도·바람 배율 같은 추정 계수 없이, 학습한 랜덤포레스트가
   만안 날씨(예보)로 안양대 기온·습도·풍속을 예측한다.
 - 이미 지난 시각은 안양대 500m 격자 실측값(observed)을 그대로 쓴다.
+- 오늘 실측 반영(nowcast): 최근 정시 실측과, 그 시각 예보로 AI가 낸 예측의 차이(오차)를
+  앞으로의 예측에 더한다. 예보 자체가 빗나간 것과 AI가 빗나간 것이 함께 잡힌다.
+  오차는 몇 시간 동안 같은 방향으로 이어지므로 가중치 exp(−경과시간/4시간)으로 줄여 간다.
+  (2025년 검증: ±1°C 정답률 1시간 뒤 72.0 → 78.9%, 3시간 뒤 74.6%, 6시간 뒤 거의 원래대로)
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -16,6 +21,7 @@ from campus_model import CampusModel, kma_feels
 
 WIND_LINE = 1.3   # 기상청 겨울 체감온도 계산 기준 풍속 (m/s)
 WIND_BAND = 0.3   # 예측 풍속이 기준선 ± 이 범위면 체감온도를 범위로 보여줌
+NOWCAST_TAU = 4.0  # 오늘 실측 반영 가중치가 줄어드는 속도 (시간)
 
 _model = {"m": None, "loaded": False, "error": None}
 
@@ -61,18 +67,47 @@ def _wind_range(month, ta, rh, ws):
     return min(a, b, f), max(a, b, f)
 
 
-def campus_batch(df: pd.DataFrame) -> pd.DataFrame:
+def _predict(m, temp, hum, wind, times) -> np.ndarray:
+    times = pd.to_datetime(pd.Series(times))
+    x = pd.DataFrame({"aws_ta": np.asarray(temp, float), "aws_hm": np.asarray(hum, float),
+                      "aws_ws": np.asarray(wind, float),
+                      "month": times.dt.month.to_numpy(), "hour": times.dt.hour.to_numpy()})
+    return m.predict(x) if m is not None else x[["aws_ta", "aws_hm", "aws_ws"]].to_numpy(float)
+
+
+def nowcast_error(nowcast: dict | None) -> dict | None:
+    """정시 실측 − (그 시각 예보 → AI 예측). nowcast = {time, obs{temp,humidity,wind}, fcst{...}}."""
+    if not nowcast:
+        return None
+    f, o = nowcast["fcst"], nowcast["obs"]
+    p = _predict(campus_model(), [f["temp"]], [f["humidity"]], [f["wind"]], [nowcast["time"]])[0]
+    return {"time": pd.Timestamp(nowcast["time"]), "temp": o["temp"] - p[0],
+            "humidity": o["humidity"] - p[1], "wind": o["wind"] - p[2]}
+
+
+def nowcast_weight(times, ref_time) -> np.ndarray:
+    lead = (pd.to_datetime(pd.Series(times)) - pd.Timestamp(ref_time)).dt.total_seconds() / 3600
+    return np.exp(-np.clip(lead.to_numpy(float), 0, None) / NOWCAST_TAU)
+
+
+def campus_batch(df: pd.DataFrame, nowcast: dict | None = None) -> pd.DataFrame:
     """여러 시각 한꺼번에: df(time, temp, wind, humidity) → 안양대 기온·습도·풍속 예측.
 
+    nowcast(weather.nowcast_ref 결과)가 있으면 오늘 실측 오차를 반영한다.
+    base_* 는 반영 전 AI 예측, nowcast_w 는 반영 가중치 (0~1).
     모델이 없으면 만안 값을 그대로 쓴다 (보정 없음).
     """
-    m = campus_model()
-    x = pd.DataFrame({"aws_ta": df["temp"].to_numpy(float), "aws_hm": df["humidity"].to_numpy(float),
-                      "aws_ws": df["wind"].to_numpy(float),
-                      "month": df["time"].dt.month.to_numpy(), "hour": df["time"].dt.hour.to_numpy()})
-    p = m.predict(x) if m is not None else x[["aws_ta", "aws_hm", "aws_ws"]].to_numpy(float)
-    return pd.DataFrame({"campus_temp": p[:, 0], "campus_humidity": p[:, 1], "campus_wind": p[:, 2]},
-                        index=df.index)
+    p = _predict(campus_model(), df["temp"], df["humidity"], df["wind"], df["time"])
+    out = pd.DataFrame({"base_temp": p[:, 0], "base_humidity": p[:, 1], "base_wind": p[:, 2]},
+                       index=df.index)
+    err = nowcast_error(nowcast)
+    w = nowcast_weight(df["time"], err["time"]) if err else np.zeros(len(df))
+    e = err or {"temp": 0.0, "humidity": 0.0, "wind": 0.0}
+    out["campus_temp"] = out["base_temp"] + w * e["temp"]
+    out["campus_humidity"] = np.clip(out["base_humidity"] + w * e["humidity"], 0, 100)
+    out["campus_wind"] = np.clip(out["base_wind"] + w * e["wind"], 0, None)
+    out["nowcast_w"] = w
+    return out
 
 
 @dataclass
@@ -89,7 +124,8 @@ class CampusFeel:
     climate_delta: float      # 기온·습도 차이로 바뀐 체감 (°C)
     wind_delta: float         # 바람 차이로 바뀐 체감 (°C)
     sensitivity_delta: float  # 개인 보정 (°C)
-    source: str               # "AI 예측" | "실측(500m 격자)" | "보정 없음"
+    source: str               # "AI 예측" | "AI 예측 + 오늘 실측 반영" | "실측(500m 격자)" | "보정 없음"
+    nowcast_delta: float = 0.0  # 오늘 실측 반영으로 바뀐 체감 (°C)
 
 
 def campus_feels_like(temp_c: float, wind_ms: float, rh: float, when, sensitivity: str = "보통",
@@ -109,16 +145,24 @@ def campus_feels_like(temp_c: float, wind_ms: float, rh: float, when, sensitivit
             predicted = campus_batch(row).iloc[0].to_dict()
         ta, hm, ws = predicted["campus_temp"], predicted["campus_humidity"], predicted["campus_wind"]
         source = "AI 예측" if campus_model() is not None else "보정 없음"
+    # 오늘 실측 반영 전 값 (기온·습도/바람 분해는 반영 전 AI 예측으로)
+    bta = predicted.get("base_temp", ta) if observed is None else ta
+    bhm = predicted.get("base_humidity", hm) if observed is None else hm
+    bws = predicted.get("base_wind", ws) if observed is None else ws
 
     app_feels = feels_like(temp_c, wind_ms, rh, month)
     feels = feels_like(ta, ws, hm, month)
-    mid = feels_like(ta, wind_ms, hm, month)   # 기온·습도만 캠퍼스 값, 바람은 날씨앱 그대로
+    base = feels_like(bta, bws, bhm, month)
+    nowcast = feels - base
+    if observed is None and predicted.get("nowcast_w", 0) >= 0.05:
+        source = "AI 예측 + 오늘 실측 반영"
+    mid = feels_like(bta, wind_ms, bhm, month)   # 기온·습도만 캠퍼스 값, 바람은 날씨앱 그대로
     low, high = _wind_range(month, ta, hm, ws) if observed is None else (feels, feels)
     sens = config.SENSITIVITY_OFFSET.get(sensitivity, 0.0)
     return CampusFeel(
         app_temp=float(temp_c), app_feels=app_feels,
         campus_temp=float(ta), campus_humidity=float(hm), campus_wind=float(ws),
         feels=feels, feels_low=low, feels_high=high, personal=feels + sens,
-        climate_delta=mid - app_feels, wind_delta=feels - mid, sensitivity_delta=sens,
-        source=source,
+        climate_delta=mid - app_feels, wind_delta=base - mid, sensitivity_delta=sens,
+        source=source, nowcast_delta=nowcast,
     )
