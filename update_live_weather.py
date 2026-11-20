@@ -144,16 +144,16 @@ def update_history(stamp: str) -> None:
     campus = json.loads((DOCS / "campus_now.json").read_text(encoding="utf-8"))
     fc = json.loads((DOCS / "forecast.json").read_text(encoding="utf-8"))
 
-    nc = campus.get("nowcast")
-    if nc and "last_error" not in campus:          # 이번에 새로 받은 정시 실측
+    nc = campus.get("nowcast")     # 사이트가 지금 쓰는 실측 (이번에 못 받았으면 직전 값 — 그래도 실제 관측)
+    if nc:
         t = datetime.strptime(nc["time"], "%Y-%m-%d %H:%M")
         o = nc["obs"]
         obs[nc["time"]] = {"temp": round(o["temp"], 1), "humidity": round(o["humidity"]),
                            "wind": round(o["wind"], 1),
                            "feels": round(site_model.feels(t.month, o["temp"], o["humidity"], o["wind"]), 1)}
 
-    if fc.get("hourly") and "last_error" not in fc:   # 사이트가 지금 보여주는 예측 (민감도 보통)
-        err = site_model.nowcast_error(nc) if nc and "last_error" not in campus else None
+    if fc.get("hourly"):   # 사이트가 지금 보여주는 예측 (민감도 보통, 사이트와 같은 파일·같은 계산)
+        err = site_model.nowcast_error(nc) if nc else None
         for r in fc["hourly"]:
             t = datetime.strptime(f"{r['date']} {r['hour']:02d}:00", "%Y-%m-%d %H:%M")
             if t <= now or t.date() != now.date():
