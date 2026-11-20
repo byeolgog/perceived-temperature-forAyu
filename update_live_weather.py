@@ -3,6 +3,8 @@
   docs/campus_now.json : 안양대 500m 격자 최신 실측 (기온·습도·풍속·체감온도)
                          + nowcast: 정시 실측과 그 시각 만안구 예보 (오늘 실측 반영용)
   docs/forecast.json   : 기상청 만안구 초단기실황(지금 기온) + 단기예보(시간별, 약 3일)
+  docs/history.json    : 오늘·어제 시간별 캠퍼스 실측 + 그 시각을 사이트가 어떻게 예측했는지
+                         (처음 예측 / 직전 예측) — 지난 시간의 '예측 vs 실측' 비교용
 
 HTML 버전(GitHub Pages)이 이 파일들을 읽어, 인증키 없이도 기상청 값으로 화면을 그린다.
 
@@ -20,7 +22,9 @@ import sys
 import requests
 
 import config
+import site_model
 import weather
+from campus_model import kma_feels
 
 DOCS = config.BASE_DIR / "docs"
 
@@ -102,11 +106,16 @@ def previous(name: str) -> dict | None:
     base = os.environ.get("PAGES_URL")
     if not base:
         return None
-    try:
-        r = requests.get(f"{base.rstrip('/')}/{name}", timeout=15)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
-        return None
+    for _ in range(3):   # 기록 파일은 이어 쓰므로 한 번 실패로 날아가지 않게 재시도
+        try:
+            r = requests.get(f"{base.rstrip('/')}/{name}", timeout=15)
+            if r.status_code == 404:
+                return None
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+    return None
 
 
 def write(name: str, make, ok_key: str, stamp: str) -> None:
@@ -126,6 +135,44 @@ def write(name: str, make, ok_key: str, stamp: str) -> None:
     (DOCS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def update_history(stamp: str) -> None:
+    """history.json: 직전 공개본을 이어받아 이번 시간의 실측과 예측을 더한다 (어제·오늘만 보관)."""
+    from datetime import datetime, timedelta
+    now = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+    hist = previous("history.json") or {}
+    obs, pred = hist.get("obs", {}), hist.get("pred", {})
+
+    campus = json.loads((DOCS / "campus_now.json").read_text(encoding="utf-8"))
+    fc = json.loads((DOCS / "forecast.json").read_text(encoding="utf-8"))
+
+    nc = campus.get("nowcast")
+    if nc and "last_error" not in campus:          # 이번에 새로 받은 정시 실측
+        t = datetime.strptime(nc["time"], "%Y-%m-%d %H:%M")
+        o = nc["obs"]
+        obs[nc["time"]] = {"temp": round(o["temp"], 1), "humidity": round(o["humidity"]),
+                           "wind": round(o["wind"], 1),
+                           "feels": round(float(kma_feels(t.month, o["temp"], o["humidity"], o["wind"])), 1)}
+
+    if fc.get("hourly") and "last_error" not in fc:   # 사이트가 지금 보여주는 예측 (민감도 보통)
+        err = site_model.nowcast_error(nc) if nc and "last_error" not in campus else None
+        for r in fc["hourly"]:
+            t = datetime.strptime(f"{r['date']} {r['hour']:02d}:00", "%Y-%m-%d %H:%M")
+            if t <= now or t.date() != now.date():
+                continue                               # 아직 오지 않은 오늘 시각만
+            f = round(site_model.campus_feels(r["temp"], r["wind"], r["humidity"], t, err)["feels"], 1)
+            key = t.strftime("%Y-%m-%d %H:%M")
+            entry = pred.setdefault(key, {"first": {"feels": f, "made": stamp}})
+            entry["last"] = {"feels": f, "made": stamp}
+
+    keep = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    data = {"obs": {k: v for k, v in sorted(obs.items()) if k >= keep},
+            "pred": {k: v for k, v in sorted(pred.items()) if k >= keep},
+            "updated_at": stamp}
+    (DOCS / "history.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    both = [k for k in data["obs"] if k in data["pred"] and k.startswith(now.strftime("%Y-%m-%d"))]
+    print(f"history.json: 실측 {len(data['obs'])}시간, 예측 {len(data['pred'])}시간, 오늘 비교 가능 {len(both)}시간")
+
+
 def main() -> int:
     stamp = weather.kst_now().strftime("%Y-%m-%d %H:%M")
     key = os.environ.get("KMA_APIHUB_KEY", "").strip()
@@ -142,6 +189,10 @@ def main() -> int:
 
     write("campus_now.json", campus, "feels", stamp)
     write("forecast.json", forecast, "hourly", stamp)
+    try:
+        update_history(stamp)
+    except Exception as e:   # 기록이 실패해도 사이트 배포는 계속
+        print(f"history.json: 기록 실패 — {type(e).__name__} {e}", file=sys.stderr)
 
     for name in ("campus_now.json", "forecast.json"):
         js = json.loads((DOCS / name).read_text(encoding="utf-8"))
