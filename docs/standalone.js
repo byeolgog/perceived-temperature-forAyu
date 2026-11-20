@@ -193,6 +193,24 @@ const Standalone = (() => {
              humidity: Math.round(cm.campusHum), time: `${String(cur.hour).padStart(2, "0")}:00`, kind: "AI 예측" };
   }
 
+  // ---------- 오늘 AI 예측 vs 캠퍼스 실측 (history.json, GitHub Actions가 매시간 기록) ----------
+  async function todayCheck() {
+    try {
+      const js = await (await fetch("history.json?t=" + Date.now(), { cache: "no-store" })).json();
+      const today = kstNow().date;
+      const rows = Object.keys(js.obs || {}).filter((k) => k.startsWith(today) && js.pred?.[k]?.last).sort()
+        .map((k) => {
+          const o = js.obs[k], p = js.pred[k];
+          return { hour: +k.slice(11, 13), actual: o.feels, temp: o.temp, wind: o.wind,
+                   first: p.first.feels, firstMade: p.first.made.slice(11, 16),
+                   last: p.last.feels, lastMade: p.last.made.slice(11, 16), diff: +(p.last.feels - o.feels).toFixed(1) };
+        });
+      const hit = rows.filter((r) => Math.abs(r.diff) <= 1).length;
+      const mae = rows.length ? rows.reduce((a, r) => a + Math.abs(r.diff), 0) / rows.length : null;
+      return { rows, hit, mae: mae === null ? null : +mae.toFixed(1) };
+    } catch (e) { return null; }
+  }
+
   // ---------- service.py 와 같은 응답 ----------
   async function home() {
     const f = await forecast(), now = kstNow();
@@ -201,7 +219,9 @@ const Standalone = (() => {
     const appLabel = f.now ? `${f.now.source || "기상청 초단기실황"} ${f.now.time.slice(11, 16)}` : f.source;
     const ampm = now.hour < 12 ? "오전" : "오후";
     const campus = await campusNow(cur);
+    const check = await todayCheck();
     return {
+      today_check: check,
       campus: C.campus,
       now_label: `${dateLabel(now.date)} ${ampm} ${now.hour % 12 || 12}:${String(now.minute).padStart(2, "0")}`,
       app_temp: Math.round(appNow), app_label: appLabel, source: f.source,

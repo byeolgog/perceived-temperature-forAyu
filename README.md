@@ -22,7 +22,8 @@
    - **오늘 실측 반영**: 최근 정시 실측 − (그 시각 예보로 AI가 낸 예측) = 오늘의 오차. 예보가 빗나간 만큼과 AI가 빗나간 만큼이 함께 잡히고, 몇 시간은 같은 방향으로 이어지므로 앞으로의 예측에 `exp(−경과시간/4시간)`만큼 더함 (1시간 뒤 78%, 4시간 뒤 37%, 12시간 뒤 5%)
 3. **체감온도 (공식)**: 기상청 공식 그대로 (10~4월 바람: 기온 10°C 이하·풍속 1.3 m/s 이상일 때, 5~9월 습도) + 추위 민감도(±2°C)
 4. **옷차림 (AI)**: 시간대별 옷차림 단계를 예측해 가장 두껍게 입어야 하는 시간 기준으로 추천
-5. **실시간 갱신**: GitHub Actions가 매시간 안양대 500m 격자 실측값과 기상청 만안구 실황·예보를 받아 사이트에 반영
+5. **오늘 예측 vs 실측**: 매시간 그 시각 사이트 예측(처음·직전)과 캠퍼스 실측을 `history.json`에 쌓아, 홈 화면에 "오늘 AI 예측, 얼마나 맞았나" 표로 보여줌 (`site_model.py`가 브라우저와 똑같이 계산)
+6. **실시간 갱신**: GitHub Actions가 매시간 안양대 500m 격자 실측값과 기상청 만안구 실황·예보를 받아 사이트에 반영
 
 ### 캠퍼스 보정 모델 (Random Forest 회귀)
 
@@ -105,7 +106,8 @@ API허브에서 **고해상도 격자자료**와 **단기예보** 둘 다 활용
 | `config.py` | 좌표, 경로, 민감도 등 설정 |
 | `docs/` | 화면 (`index.html`), 웹 체험판 로직 (`standalone.js`), 웹용 모델 (`model.js`) |
 | `web_export.py` | 웹용 모델 만들기: `config.py`·`outfit.py`·학습 데이터를 바꾸면 다시 실행 |
-| `update_live_weather.py` | 안양대 실측 → `docs/campus_now.json`, 만안구 실황·예보 → `docs/forecast.json` (Actions가 매시간 실행) |
+| `update_live_weather.py` | 안양대 실측 → `docs/campus_now.json`, 만안구 실황·예보 → `docs/forecast.json`, 예측·실측 기록 → `docs/history.json` (Actions가 매시간 실행) |
+| `site_model.py` | 브라우저(standalone.js)와 똑같은 캠퍼스 체감 계산 — 예측 기록용 |
 | `data/train_data.csv` | 캠퍼스 모델 학습 데이터 |
 | `notebooks/` | 학습 데이터를 만들고 실험한 Colab 노트북 (아래 참고) |
 
