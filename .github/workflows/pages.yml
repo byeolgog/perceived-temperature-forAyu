@@ -12,7 +12,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "43 * * * *"   # 60분마다, 매시 47분 (그 시각 기상청 실측·예보가 가장 최신). GitHub 사정으로 몇 분 늦을 수 있음
+    - cron: "43 * * * *"   # 60분마다, 매시 43분. 실제 매시간 실행은 cron-job.org가 workflow_dispatch로 눌러줌 (이 저장소는 schedule이 돌지 않음)
   workflow_dispatch:        # Actions 탭에서 수동 실행
 
 permissions:
@@ -54,4 +54,13 @@ jobs:
           path: docs
 
       - id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true   # GitHub 쪽 일시 오류("No artifacts named github-pages")가 가끔 남
+
+      - name: 배포 재시도 (40초 뒤)
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 40
+
+      - id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
