@@ -276,6 +276,7 @@ const Standalone = (() => {
         hour: worst.hour, feels: Math.round(+cf.personal.toFixed(1)), app: Math.round(cf.appFeels), diff,
         campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), nowcast: +cf.nowcast.toFixed(1), sensitivity: +cf.sens.toFixed(1),
         range: Math.round(cf.low) !== Math.round(cf.high) ? [Math.round(cf.low), Math.round(cf.high)] : null,
+        nowcast_hour: err && nowcastWeight(err, target, sel[0].hour) >= 0.05 ? err.hour : null,
         basis: cf.nowcastW >= 0.05 ? "AI 예측(웹 축소판) + 오늘 실측 반영" : "AI 예측(웹 축소판)",
         level: lv.level, level_name: lv.name,
         categories: Object.entries(cats).map(([name, items]) => ({

@@ -105,6 +105,9 @@
   .feel-card .big { font-size: 84px; font-weight: 800; letter-spacing: -3px; line-height: 1.05; margin: 6px 0 10px; }
   .badge { display: inline-block; background: var(--red); color: #fff; font-weight: 700; font-size: 13px; padding: 5px 12px; border-radius: 8px; }
   .badge.warm { background: #f97316; }
+  .guide ul { margin: 0; padding-left: 18px; word-break: keep-all; font-size: 13px; line-height: 1.6; color: #4b5563; }
+  .guide li + li { margin-top: 6px; }
+  .guide b { color: #111827; }
   .feel-card .why { font-size: 12px; opacity: .8; margin-top: 14px; }
   .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
   .btn { padding: 13px; border-radius: 10px; font-weight: 700; font-size: 14px; }
@@ -281,6 +284,10 @@
           <div class="xlabels" id="xlabels"></div>
           <div class="warn" id="rWarn"></div>
         </div>
+        <div class="card guide">
+          <h3>📌 이 예측은 이렇게 읽어주세요</h3>
+          <ul id="rNotice"></ul>
+        </div>
         <div class="card examples">
           <h3>👀 이런 옷이에요 <span class="muted">쇼핑몰 예시 이미지 · 참고용</span></h3>
           <div id="examples"></div>
@@ -455,6 +462,22 @@ async function analyze() {
   show("result");
 }
 
+function renderNotice(d) {
+  const r = d.result, H = r.nowcast_hour;
+  const hh = (h) => `${((h % 24) + 24) % 24}시`;
+  const items = [
+    `<b>날씨 예보를 바탕으로 한 예측이에요.</b> ${esc(d.source || "기상청 단기예보")}(안양시 만안구)를 AI에 넣어 캠퍼스 값을 계산하기 때문에, 예보가 빗나가면 실제 체감과 다를 수 있어요.`,
+    H !== null && H !== undefined
+      ? `<b>오늘 ${hh(H)} 캠퍼스 실측이 반영돼 있어요.</b> ${hh(H + 1)}~${hh(H + 3)} 예측이 가장 정확하고(±1°C 안에 맞을 확률 약 75~79%), ${hh(H + 6)} 이후는 실측 효과가 거의 없어 기본 정확도(약 72%)로 돌아가요.`
+      : state.day !== "오늘"
+      ? `<b>내일 예측에는 오늘 실측이 반영되지 않아요.</b> 실측 효과는 6시간 정도만 이어져서, 내일은 예보 + AI 기본 정확도(±1°C 안에 맞을 확률 약 72%)예요. 내일 아침에 다시 확인하면 더 정확해요.`
+      : `<b>아직 반영된 오늘 실측이 없어요.</b> 지금은 예보 + AI 기본 정확도(±1°C 안에 맞을 확률 약 72%)예요.`,
+    `<b>매시간 20분쯤 새로 바로잡혀요.</b> 캠퍼스 실측은 약 1시간 늦게 나와서 늘 한 시간 전 값이 반영돼요. 아침에 한 번 보기보다 <b>나가기 1~3시간 전에 다시 확인</b>하면 더 정확해요.`,
+    `<b>겨울은 정확도가 낮아요</b>(±1°C 약 65%). 바람이 1.3m/s 기준선을 넘나들면 기상청 공식상 체감온도가 2°C 가까이 달라져, 그럴 땐 범위로 보여드려요.`,
+  ];
+  $("rNotice").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
+}
+
 function renderResult(d) {
   const r = d.result;
   $("rLabel").textContent = `안양대 캠퍼스 체감온도 · ${d.date_label} ${r.hour}시`;
@@ -469,6 +492,7 @@ function renderResult(d) {
     + (r.range ? ` · 바람이 1.3m/s 기준선 근처라 ${r.range[0]}°~${r.range[1]}°까지 느껴질 수 있어요` : "");
   $("rComment").textContent = r.comment;
   $("rTip").textContent = r.tip;
+  renderNotice(d);
   $("rBasis").textContent = `근거: ${d.source} · 캠퍼스 ${r.basis || "AI 예측"} · 학생 제보 ${r.feedback_total}건 · 옷차림 ${r.model}`;
   $("rLevel").textContent = `· ${r.level_name}`;
   // 카테고리별 칸: 대표 아이템(첫 번째) 크게 + 나머지는 '또는'으로

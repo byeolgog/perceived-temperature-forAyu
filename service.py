@@ -262,6 +262,8 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
             "campus": round(cf.climate_delta, 1),
             "wind": round(cf.wind_delta, 1),
             "nowcast": round(cf.nowcast_delta, 1),
+            "nowcast_hour": (pd.Timestamp(_cache["nowcast"]["time"]).hour
+                             if _cache["nowcast"] and hours[0]["cf"].source.endswith("실측 반영") else None),
             "range": [r0(low), r0(high)] if r0(low) != r0(high) else None,
             "basis": cf.source,
             "sensitivity": round(cf.sensitivity_delta, 1),
