@@ -24,7 +24,6 @@ import requests
 import config
 import site_model
 import weather
-from campus_model import kma_feels
 
 DOCS = config.BASE_DIR / "docs"
 
@@ -151,7 +150,7 @@ def update_history(stamp: str) -> None:
         o = nc["obs"]
         obs[nc["time"]] = {"temp": round(o["temp"], 1), "humidity": round(o["humidity"]),
                            "wind": round(o["wind"], 1),
-                           "feels": round(float(kma_feels(t.month, o["temp"], o["humidity"], o["wind"])), 1)}
+                           "feels": round(site_model.feels(t.month, o["temp"], o["humidity"], o["wind"]), 1)}
 
     if fc.get("hourly") and "last_error" not in fc:   # 사이트가 지금 보여주는 예측 (민감도 보통)
         err = site_model.nowcast_error(nc) if nc and "last_error" not in campus else None

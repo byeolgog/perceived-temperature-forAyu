@@ -11,7 +11,6 @@ from datetime import datetime
 from functools import lru_cache
 
 import config
-from campus_model import kma_feels
 
 NOWCAST_TAU = 4.0
 
@@ -44,7 +43,15 @@ def campus_predict(t, w, rh, month, hour) -> dict:
 
 
 def feels(month, ta, rh, ws) -> float:
-    return float(kma_feels(month, ta, rh, ws))
+    """기상청 체감온도 (campus_model.kma_feels 와 같은 식, GitHub Actions에서 numpy·sklearn 없이 쓰려고 따로 둠)."""
+    if 5 <= month <= 9:
+        tw = (ta * math.atan(0.151977 * math.sqrt(rh + 8.313659)) + math.atan(ta + rh) - math.atan(rh - 1.67633)
+              + 0.00391838 * rh ** 1.5 * math.atan(0.023101 * rh) - 4.686035)
+        return -0.2442 + 0.55399 * tw + 0.45535 * ta - 0.0022 * tw * tw + 0.00278 * tw * ta + 3.0
+    if ta > 10 or ws < 1.3:
+        return float(ta)
+    v16 = (ws * 3.6) ** 0.16
+    return 13.12 + 0.6215 * ta - 11.37 * v16 + 0.3965 * v16 * ta
 
 
 def nowcast_error(nc: dict | None) -> dict | None:
