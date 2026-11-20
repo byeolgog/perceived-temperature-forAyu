@@ -56,23 +56,63 @@ def add_nowcast(data: dict) -> dict:
     return data
 
 
-def fetch_campus(key: str, tries: int = 3) -> dict:
+def _grid(key: str, tm1, tm2, itv: int, tries: int = 3):
+    """격자 조회 (시각 직접 지정: tm1~tm2). 성공하면 parse_grid 결과, 실패하면 예외."""
     last = None
     for _ in range(tries):
         try:
             r = requests.get(config.CAMPUS_GRID_URL, params={
-                "obs": weather.CAMPUS_OBS, "itv": 10,
+                "tm1": tm1.strftime("%Y%m%d%H%M"), "tm2": tm2.strftime("%Y%m%d%H%M"),
+                "obs": weather.CAMPUS_OBS, "itv": itv,
                 "lon": config.CAMPUS_LON, "lat": config.CAMPUS_LAT, "help": 0, "authKey": key,
             }, timeout=(15, 45))
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")   # URL에 키가 있으므로 상태 코드만
-            data = parse_latest(r.text)
-            if data is None:
-                raise RuntimeError("최근 1시간 자료가 비어 있음")
-            return add_nowcast({**data, "source": "기상청 고해상도 격자(500m) 실측"})
+            return weather.parse_grid(r.text)
         except Exception as e:
             last = e
     raise RuntimeError(f"{tries}번 시도 모두 실패: {type(last).__name__} {last}")
+
+
+def fetch_campus(key: str) -> dict:
+    """최근 5시간 정시 실측(놓친 시간 채우기용) + 최근 10분 간격 실측(지금 값).
+
+    '최근 1시간' 조회(시각 미지정)가 504로 막히는 때가 있어, 코랩 수집 때처럼 시각을 직접 지정한다.
+    """
+    from datetime import timedelta
+    now = weather.kst_now().replace(second=0, microsecond=0)
+    hour_end = now.replace(minute=0)
+    hourly, latest, errs = None, None, []
+    try:
+        hourly = _grid(key, hour_end - timedelta(hours=5), hour_end, 60)
+    except Exception as e:
+        errs.append(f"정시 자료: {e}")
+    try:
+        end10 = now - timedelta(minutes=now.minute % 10)
+        latest = _grid(key, end10 - timedelta(minutes=70), end10, 10)
+    except Exception as e:
+        errs.append(f"10분 자료: {e}")
+
+    hourly = hourly if hourly is not None and not hourly.empty else None
+    latest = latest if latest is not None and not latest.empty else None
+    if hourly is None and latest is None:
+        raise RuntimeError(" / ".join(errs) or "최근 자료가 비어 있음")
+
+    src = latest if latest is not None else hourly
+    r = src.iloc[-1]
+    data = {"time": r.time.strftime("%Y-%m-%d %H:%M"), "temp": float(r.temp),
+            "humidity": float(r.humidity), "wind": float(r.wind), "feels": float(r.feels),
+            "source": "기상청 고해상도 격자(500m) 실측"}
+    # 정시 값: 정시 자료의 마지막 줄, 없으면 10분 자료에서 (정시 ±10분 보간)
+    data["_hour_obs"] = (weather.hour_obs(hourly) if hourly is not None else None) or \
+                        (weather.hour_obs(latest) if latest is not None else None)
+    if hourly is not None:   # 최근 몇 시간 정시 실측 — history.json의 빈 시간을 채운다
+        data["recent_hours"] = [{"time": h.time.strftime("%Y-%m-%d %H:%M"), "temp": float(h.temp),
+                                 "humidity": float(h.humidity), "wind": float(h.wind)}
+                                for h in hourly.itertuples() if h.time.minute == 0]
+    if errs:
+        data["partial_error"] = " / ".join(errs)
+    return add_nowcast(data)
 
 
 def fetch_forecast(tries: int = 3) -> dict:
@@ -144,13 +184,17 @@ def update_history(stamp: str) -> None:
     campus = json.loads((DOCS / "campus_now.json").read_text(encoding="utf-8"))
     fc = json.loads((DOCS / "forecast.json").read_text(encoding="utf-8"))
 
+    def add_obs(key, o):
+        t = datetime.strptime(key, "%Y-%m-%d %H:%M")
+        obs[key] = {"temp": round(o["temp"], 1), "humidity": round(o["humidity"]), "wind": round(o["wind"], 1),
+                    "feels": round(site_model.feels(t.month, o["temp"], o["humidity"], o["wind"]), 1)}
+
+    for h in campus.get("recent_hours", []):   # 최근 몇 시간 정시 실측 (놓친 시간 채우기)
+        add_obs(h["time"], h)
+
     nc = campus.get("nowcast")     # 사이트가 지금 쓰는 실측 (이번에 못 받았으면 직전 값 — 그래도 실제 관측)
     if nc:
-        t = datetime.strptime(nc["time"], "%Y-%m-%d %H:%M")
-        o = nc["obs"]
-        obs[nc["time"]] = {"temp": round(o["temp"], 1), "humidity": round(o["humidity"]),
-                           "wind": round(o["wind"], 1),
-                           "feels": round(site_model.feels(t.month, o["temp"], o["humidity"], o["wind"]), 1)}
+        add_obs(nc["time"], nc["obs"])
 
     if fc.get("hourly"):   # 사이트가 지금 보여주는 예측 (민감도 보통, 사이트와 같은 파일·같은 계산)
         err = site_model.nowcast_error(nc) if nc else None
