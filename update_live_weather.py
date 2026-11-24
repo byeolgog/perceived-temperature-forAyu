@@ -174,6 +174,9 @@ def write(name: str, make, ok_key: str, stamp: str) -> None:
     (DOCS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+LEAD_HOURS = 2   # 홈 화면 비교 표의 'N시간 전 예측' (docs/standalone.js 의 LEAD_KEY 와 맞출 것)
+
+
 def update_history(stamp: str) -> None:
     """history.json: 직전 공개본을 이어받아 이번 시간의 실측과 예측을 더한다 (어제·오늘만 보관)."""
     from datetime import datetime, timedelta
@@ -206,6 +209,10 @@ def update_history(stamp: str) -> None:
             key = t.strftime("%Y-%m-%d %H:%M")
             entry = pred.setdefault(key, {"first": {"feels": f, "made": stamp}})
             entry["last"] = {"feels": f, "made": stamp}
+            # N시간 전 예측: 그 시각까지 N시간(+30분) 이하로 남은 첫 실행 값 (매시 43분 실행 → N시간 17분 전)
+            lead = (t - now).total_seconds() / 3600
+            if f"h{LEAD_HOURS}" not in entry and lead <= LEAD_HOURS + 0.5:
+                entry[f"h{LEAD_HOURS}"] = {"feels": f, "made": stamp}
 
     keep = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     data = {"obs": {k: v for k, v in sorted(obs.items()) if k >= keep},
