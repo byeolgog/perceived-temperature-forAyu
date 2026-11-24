@@ -209,10 +209,10 @@
         <div class="check-card" id="checkCard" hidden>
           <div class="check-head"><b>📋 오늘 AI 예측, 얼마나 맞았나</b><span id="checkSum"></span></div>
           <table class="check-table">
-            <thead><tr><th>시각</th><th>처음 예측</th><th>직전 예측</th><th>실제</th><th>차이</th></tr></thead>
+            <thead><tr><th>시각</th><th>처음 예측</th><th>2시간 전 예측</th><th>실제</th><th>차이</th></tr></thead>
             <tbody id="checkRows"></tbody>
           </table>
-          <div class="check-foot">캠퍼스 체감온도(민감도 보통). 처음 예측 = 오늘 그 시각을 처음 예측한 값, 직전 예측 = 그 시각 직전에 낸 값(오늘 실측 반영). 실제 = 안양대 500m 격자 실측으로 계산.</div>
+          <div class="check-foot">캠퍼스 체감온도(민감도 보통). 처음 예측 = 그날 0시 43분에 낸 값, 2시간 전 예측 = 그 시각 약 2시간 전에 낸 값(오늘 실측 반영). 차이는 2시간 전 예측 기준. <span id="checkApprox" hidden>* = 2시간 전 기록이 없어 직전 값으로 대신.</span> 실제 = 안양대 500m 격자 실측으로 계산.</div>
         </div>
         <div class="features">
           <div class="feature"><div class="ic">🤖</div><b>AI 캠퍼스 보정</b><span>3년치 기상 데이터 학습</span></div>
@@ -399,9 +399,10 @@ function renderCheck(c) {
   card.hidden = false;
   $("checkSum").textContent = `${c.rows.length}시간 중 ${c.hit}시간 ±1° 안 · 평균 차이 ${f1(c.mae)}°`;
   const sg = (v) => (v > 0 ? "+" : v < 0 ? "−" : "±") + f1(Math.abs(v));
+  $("checkApprox").hidden = !c.rows.slice(-8).some((r) => r.approx);
   $("checkRows").innerHTML = c.rows.slice(-8).map((r) =>
     `<tr><td>${r.hour}시</td><td title="${esc(r.firstMade)}에 예측">${f1(r.first)}°</td>`
-    + `<td title="${esc(r.lastMade)}에 예측">${f1(r.last)}°</td><td>${f1(r.actual)}°</td>`
+    + `<td title="${esc(r.lastMade)}에 예측">${f1(r.last)}°${r.approx ? "*" : ""}</td><td>${f1(r.actual)}°</td>`
     + `<td class="${Math.abs(r.diff) <= 1 ? "ok" : "miss"}">${sg(r.diff)}°</td></tr>`).join("");
 }
 

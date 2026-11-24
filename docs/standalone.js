@@ -198,12 +198,15 @@ const Standalone = (() => {
     try {
       const js = await (await fetch("history.json?t=" + Date.now(), { cache: "no-store" })).json();
       const today = kstNow().date;
+      const LEAD_KEY = "h2";   // 2시간 전 예측 (update_live_weather.py 의 LEAD_HOURS 와 맞출 것)
       const rows = Object.keys(js.obs || {}).filter((k) => k.startsWith(today) && js.pred?.[k]?.last).sort()
         .map((k) => {
           const o = js.obs[k], p = js.pred[k];
+          const lead = p[LEAD_KEY] || p.last;     // 2시간 전 기록이 없던 시각(도입 전)은 직전 값으로 대신
           return { hour: +k.slice(11, 13), actual: o.feels, temp: o.temp, wind: o.wind,
                    first: p.first.feels, firstMade: p.first.made.slice(11, 16),
-                   last: p.last.feels, lastMade: p.last.made.slice(11, 16), diff: +(p.last.feels - o.feels).toFixed(1) };
+                   last: lead.feels, lastMade: lead.made.slice(11, 16), approx: !p[LEAD_KEY],
+                   diff: +(lead.feels - o.feels).toFixed(1) };
         });
       const hit = rows.filter((r) => Math.abs(r.diff) <= 1).length;
       const mae = rows.length ? rows.reduce((a, r) => a + Math.abs(r.diff), 0) / rows.length : null;
