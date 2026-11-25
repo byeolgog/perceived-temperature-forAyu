@@ -9,7 +9,15 @@ data/*.joblib
 
 __pycache__/
 
+# 모델 비교 실행 기록 (compare_models.py)
+compare_runs/
+
+# 원본 CSV에서 다시 만들 수 있는 정리 결과
+data/prepared/
+data/deployed_campus_model/
+
 # GitHub Actions가 배포할 때 만드는 파일
 docs/campus_now.json
 docs/forecast.json
 docs/history.json
+docs/manan_obs.json

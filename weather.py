@@ -104,6 +104,59 @@ def fetch_kma_forecast() -> pd.DataFrame:
     return df[COLUMNS].dropna()
 
 
+def _ultra_base(now: datetime):
+    """초단기예보: 매시 30분 발표, 약 15분 뒤(45분)부터 조회 가능."""
+    t = now - timedelta(minutes=45)
+    return t.strftime("%Y%m%d"), t.strftime("%H30")
+
+
+def fetch_kma_ultra(now: datetime | None = None) -> pd.DataFrame:
+    """만안구 초단기예보: 앞으로 6시간, 1시간 간격 (기온·습도·풍속). 매시간 새로 나와 단기예보보다 최신."""
+    base_date, base_time = _ultra_base(now or kst_now())
+    items = _kma_call("getUltraSrtFcst", base_date, base_time)
+    keymap = {"T1H": "temp", "WSD": "wind", "REH": "humidity"}
+    rows = {}
+    for it in items:
+        col = keymap.get(it["category"])
+        if col:
+            t = datetime.strptime(it["fcstDate"] + it["fcstTime"], "%Y%m%d%H%M")
+            rows.setdefault(t, {"time": t})[col] = float(it["fcstValue"])
+    df = pd.DataFrame(sorted(rows.values(), key=lambda r: r["time"]))
+    df = df[["time", "temp", "wind", "humidity"]].dropna() if not df.empty else df
+    df.attrs["base"] = f"{base_date} {base_time}"
+    return df
+
+
+def overlay_ultra(forecast: pd.DataFrame, ultra: pd.DataFrame | None) -> pd.DataFrame:
+    """가까운 시간(초단기예보가 있는 최대 6시간)은 기온·습도·풍속을 초단기예보 값으로 바꾼다.
+
+    강수확률은 초단기예보에 없어서 단기예보 값을 그대로 둔다. 먼 시간은 단기예보 그대로.
+    """
+    if ultra is None or ultra.empty or forecast.empty:
+        forecast.attrs["ultra_hours"] = 0
+        return forecast
+    f = forecast.set_index("time").copy()
+    u = ultra.set_index("time")
+    common = f.index.intersection(u.index)
+    for c in ("temp", "wind", "humidity"):
+        f.loc[common, c] = u.loc[common, c]
+    out = f.reset_index()
+    out.attrs["ultra_hours"] = len(common)
+    out.attrs["ultra_base"] = ultra.attrs.get("base", "")
+    return out
+
+
+def fetch_kma_ultra_at(when: datetime) -> dict:
+    """그 시각(when, 정시)을 사이트가 직전 실행(약 17분 전)에서 받은 초단기예보로 예측한 값."""
+    df = fetch_kma_ultra(when - timedelta(minutes=17))
+    row = df[df["time"] == when]
+    if row.empty:
+        raise RuntimeError(f"{when:%m-%d %H}시가 초단기예보 {df.attrs.get('base')} 발표분에 없음")
+    r = row.iloc[0]
+    return {"temp": float(r.temp), "wind": float(r.wind), "humidity": float(r.humidity),
+            "base": f"{df.attrs.get('base')} 초단기"}
+
+
 def fetch_kma_at(when: datetime) -> dict:
     """그 시각(when, 정시)에 사이트가 쓰고 있던 만안구 예보값 {temp, wind, humidity, base}.
 
@@ -131,6 +184,59 @@ def fetch_kma_now() -> dict:
     }
 
 
+def fetch_kma_ncst_at(when: datetime) -> dict:
+    """만안구 초단기실황: 그 시각(정시)에 실제 관측한 값. 최근 약 24시간까지 조회 가능."""
+    items = _kma_call("getUltraSrtNcst", when.strftime("%Y%m%d"), when.strftime("%H00"))
+    v = {it["category"]: float(it["obsrValue"]) for it in items}
+    if "T1H" not in v:
+        raise RuntimeError(f"{when:%m-%d %H}시 초단기실황에 기온 없음")
+    return {"temp": v["T1H"], "wind": v.get("WSD", 0.0), "humidity": v.get("REH", 50.0)}
+
+
+def prepend_observed(forecast: pd.DataFrame, observed: dict, hours: int = 26) -> pd.DataFrame:
+    """지연특성용 지난 시간을 붙인다: 만안구 초단기실황 기록(observed) 우선, 빈 시간만 Open-Meteo.
+
+    observed = {"YYYY-MM-DD HH:00": {"temp", "wind", "humidity"}}.
+    학습 때 지난 24시간 자리에는 만안 AWS '관측값'이 들어갔으므로, 운영에서도 관측(초단기실황)을 쓴다.
+    미래 예보값은 그대로 두고, 결과는 빈 시간 없이 1시간 간격으로 이어지게 만든다(지연특성은 줄 이동으로 계산).
+    """
+    if forecast.empty:
+        return forecast
+    start = forecast["time"].min()
+    want = pd.date_range(start - timedelta(hours=hours), start - timedelta(hours=1), freq="h")
+    rows = {}
+    for k, v in (observed or {}).items():
+        t = pd.Timestamp(k)
+        if t in want:
+            rows[t] = {"time": t.to_pydatetime(), "temp": v["temp"], "wind": v["wind"],
+                       "humidity": v["humidity"], "pop": 0.0}
+    from_obs = set(rows)
+    missing = [t for t in want if t not in rows]
+    if missing:   # 기록이 빈 시간만 Open-Meteo로
+        try:
+            om = fetch_open_meteo()
+            om = om.set_index(pd.to_datetime(om["time"]))
+            for t in missing:
+                if t in om.index:
+                    r = om.loc[t]
+                    rows[t] = {"time": t.to_pydatetime(), "temp": float(r.temp), "wind": float(r.wind),
+                               "humidity": float(r.humidity), "pop": 0.0}
+        except Exception:
+            pass
+    past = pd.DataFrame([rows[t] for t in want if t in rows], columns=COLUMNS)
+    out = (pd.concat([past, forecast], ignore_index=True)
+           .drop_duplicates("time", keep="last").sort_values("time").reset_index(drop=True))
+    # 지난 시간 쪽에 빈 시간이 남으면 그 뒤부터만 사용 (줄 이동 지연특성이 어긋나지 않게).
+    # 예보 쪽(미래)은 원래대로 둔다 — 먼 미래에 빈 시간이 있어도 지난 기록을 버리지 않도록.
+    head = out[out["time"] <= start]
+    gaps = head["time"].diff() != pd.Timedelta(hours=1)
+    gaps.iloc[0] = False
+    if gaps.any():
+        out = out.loc[gaps[gaps].index[-1]:].reset_index(drop=True)
+    out.attrs["observed_hours"] = int(sum(t in from_obs for t in out["time"]))
+    return out
+
+
 # ---------------- 대체 소스 ----------------
 
 def fetch_open_meteo():
@@ -140,7 +246,7 @@ def fetch_open_meteo():
             # 캠퍼스가 아니라 '날씨 앱 기준 지점'(만안구) 예보를 받아 AI 모델로 캠퍼스 값 예측
             "latitude": config.APP_REF_LAT, "longitude": config.APP_REF_LON,
             "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability",
-            "wind_speed_unit": "ms", "timezone": "Asia/Seoul", "forecast_days": 3,
+            "wind_speed_unit": "ms", "timezone": "Asia/Seoul", "past_days": 1, "forecast_days": 3,
         },
         timeout=10,
     )
@@ -157,11 +263,24 @@ def fetch_open_meteo():
     return df.fillna(0)
 
 
+def prepend_history(forecast: pd.DataFrame) -> pd.DataFrame:
+    """지연특성용 지난 24시간을 붙인다. 미래 예보값은 원래 소스를 유지한다."""
+    if forecast.empty:
+        return forecast
+    try:
+        context = fetch_open_meteo()
+        past = context[context["time"] < forecast["time"].min()]
+        return (pd.concat([past, forecast], ignore_index=True)
+                .drop_duplicates("time", keep="last").sort_values("time").reset_index(drop=True))
+    except Exception:
+        return forecast
+
+
 def demo_forecast(start: date) -> pd.DataFrame:
     """인터넷이 없을 때 시연용 데이터 (월별 평년기온 + 일교차 곡선)."""
     monthly_mean = [-2.4, 0.4, 5.7, 12.5, 17.8, 22.2, 25.0, 25.7, 21.2, 14.8, 7.2, 0.4]
     rows = []
-    for d in range(3):
+    for d in range(-1, 3):
         day = start + timedelta(days=d)
         mean = monthly_mean[day.month - 1]
         for hour in range(24):
@@ -179,7 +298,7 @@ def get_forecast() -> Forecast:
     errors = []
     if _kma_endpoint()[0]:
         try:
-            fc = Forecast(fetch_kma_forecast(), "기상청 단기예보")
+            fc = Forecast(prepend_history(fetch_kma_forecast()), "기상청 단기예보")
             try:
                 fc.now = fetch_kma_now()
             except Exception as e:
@@ -270,7 +389,14 @@ def nowcast_ref(obs_hour: dict | None) -> dict | None:
     if not obs_hour:
         return None
     t = pd.Timestamp(obs_hour["time"]).to_pydatetime()
-    fc = fetch_kma_at(t)
+    fc = None
+    if getattr(config, "USE_ULTRA_NEAR", True):
+        try:   # 가까운 시간은 초단기예보를 쓰므로, 오차도 그 시각에 쓰던 초단기예보 기준으로
+            fc = fetch_kma_ultra_at(t)
+        except Exception:
+            fc = None
+    if fc is None:
+        fc = fetch_kma_at(t)
     return {"time": t.strftime("%Y-%m-%d %H:%M"),
             "obs": {k: obs_hour[k] for k in ("temp", "humidity", "wind")},
             "fcst": {k: fc[k] for k in ("temp", "humidity", "wind")}, "fcst_base": fc["base"]}

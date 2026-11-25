@@ -40,12 +40,15 @@ APP_REF_LAT = 37.39523
 APP_REF_LON = 126.89194
 
 # 기상청 단기예보 격자 좌표 (안양시 만안구)
+USE_ULTRA_NEAR = False   # 가까운 6시간에 초단기예보를 쓸지 (구버전 비교 사이트: False = 전부 단기예보)
 KMA_NX = 59
 KMA_NY = 123
 
 # 캠퍼스 AI 모델 (만안 날씨 → 안양대 기온·습도·풍속)
 CAMPUS_TRAIN_PATH = DATA_DIR / "train_data.csv"
 CAMPUS_MODEL_PATH = DATA_DIR / "campus_model.joblib"
+DEPLOYED_CAMPUS_MODEL_DIR = DATA_DIR / "deployed_campus_model"
+DEPLOYED_CAMPUS_MANIFEST = DEPLOYED_CAMPUS_MODEL_DIR / "manifest.json"
 
 # 안양대 500m 격자 실시간 값 (기상청 API허브 고해상도 격자 · 특정지점 다중요소, 약 1시간 지연)
 CAMPUS_GRID_URL = "https://apihub.kma.go.kr/api/typ01/url/sfc_nc_var.php"

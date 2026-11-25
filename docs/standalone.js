@@ -39,23 +39,182 @@ const Standalone = (() => {
     return month >= 5 && month <= 9 ? summerFeels(t, rh) : windChill(t, w);
   }
 
-  // ---------- 캠퍼스 AI 모델 (만안 → 안양대 보정량, 랜덤포레스트 축소판) ----------
+  // ---------- 캠퍼스 AI 모델 (2024년 검증 1위 체크포인트) ----------
   const CM = M.campus_model;
-  function campusPredict(t, w, rh, month, hour) {
-    const x = [t, rh, w, Math.sin(2 * Math.PI * hour / 24), Math.cos(2 * Math.PI * hour / 24),
-               Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12)];
-    const delta = (trees) => {
-      let sum = 0;
-      for (const tr of trees) {
-        let n = 0;
-        while (tr.f[n] !== -1) n = x[tr.f[n]] <= tr.t[n] ? tr.l[n] : tr.r[n];
-        sum += tr.v[n];
+  const CM_KIND = CM.kind || "rf";
+  const CM_FALLBACK = CM.fallback || CM;
+  const TARGETS = ["uni_ta", "uni_hm", "uni_ws"];
+  function rfDelta(model, x, target) {
+    let sum = 0;
+    for (const tr of model.trees[target]) {
+      let n = 0;
+      while (tr.f[n] !== -1) n = x[tr.f[n]] <= tr.t[n] ? tr.l[n] : tr.r[n];
+      sum += tr.v[n];
+    }
+    return sum / model.trees[target].length;
+  }
+  function lgbValue(node, x) {
+    while (node.v === undefined) {
+      const value = x[node.f];
+      node = !Number.isFinite(value) ? (node.d ? node.l : node.r) : (value <= node.t ? node.l : node.r);
+    }
+    return node.v;
+  }
+  function modelDelta(model, x, target) {
+    if (model.kind === "lightgbm") return model.trees[target].reduce((sum, tree) => sum + lgbValue(tree, x), 0);
+    return rfDelta(model, x, target);
+  }
+  function erf(x) {
+    const sign = x < 0 ? -1 : 1, value = Math.abs(x), p = 0.3275911;
+    const t = 1 / (1 + p * value);
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+      - 0.284496736) * t + 0.254829592) * t * Math.exp(-value * value);
+    return sign * y;
+  }
+  const gelu = (x) => 0.5 * x * (1 + erf(x / Math.sqrt(2)));
+  const sigmoid = (x) => 1 / (1 + Math.exp(-Math.max(-80, Math.min(80, x))));
+  function linearOne(state, prefix, x) {
+    const weight = state[`${prefix}.weight`], bias = state[`${prefix}.bias`];
+    return weight.map((row, i) => row.reduce((sum, value, j) => sum + value * x[j], bias[i]));
+  }
+  function linear(state, prefix, x) {
+    return Array.isArray(x[0]) ? x.map((row) => linearOne(state, prefix, row)) : linearOne(state, prefix, x);
+  }
+  function layerNorm(state, prefix, rows) {
+    const weight = state[`${prefix}.weight`], bias = state[`${prefix}.bias`];
+    return rows.map((row) => {
+      const mean = row.reduce((sum, value) => sum + value, 0) / row.length;
+      const variance = row.reduce((sum, value) => sum + (value - mean) ** 2, 0) / row.length;
+      const denominator = Math.sqrt(variance + 1e-5);
+      return row.map((value, i) => (value - mean) / denominator * weight[i] + bias[i]);
+    });
+  }
+  function transpose(matrix) { return matrix[0].map((_, column) => matrix.map((row) => row[column])); }
+  function lstmScaled(model, sequence) {
+    const state = model.state;
+    let layerInput = sequence;
+    for (let layer = 0; layer < (model.layers || 2); layer++) {
+      const wih = state[`lstm.weight_ih_l${layer}`], whh = state[`lstm.weight_hh_l${layer}`];
+      const bih = state[`lstm.bias_ih_l${layer}`], bhh = state[`lstm.bias_hh_l${layer}`];
+      const hiddenSize = whh[0].length;
+      let h = new Array(hiddenSize).fill(0), c = new Array(hiddenSize).fill(0);
+      const output = [];
+      for (const x of layerInput) {
+        const gates = wih.map((row, gate) => row.reduce((sum, value, j) => sum + value * x[j], bih[gate] + bhh[gate])
+          + whh[gate].reduce((sum, value, j) => sum + value * h[j], 0));
+        const nextH = new Array(hiddenSize), nextC = new Array(hiddenSize);
+        for (let j = 0; j < hiddenSize; j++) {
+          const inputGate = sigmoid(gates[j]), forgetGate = sigmoid(gates[hiddenSize + j]);
+          const candidate = Math.tanh(gates[2 * hiddenSize + j]), outputGate = sigmoid(gates[3 * hiddenSize + j]);
+          nextC[j] = forgetGate * c[j] + inputGate * candidate;
+          nextH[j] = outputGate * Math.tanh(nextC[j]);
+        }
+        h = nextH; c = nextC; output.push(h.slice());
       }
-      return sum / trees.length;
-    };
-    return { temp: t + delta(CM.trees.uni_ta),
-             humidity: Math.min(100, Math.max(0, rh + delta(CM.trees.uni_hm))),
-             wind: Math.max(0, w + delta(CM.trees.uni_ws)) };
+      layerInput = output;
+    }
+    const joined = layerInput[layerInput.length - 1].concat(sequence[sequence.length - 1]);
+    return linearOne(state, "head.2", linearOne(state, "head.0", joined).map(gelu));
+  }
+  function mixerScaled(model, sequence) {
+    const state = model.state;
+    let z = linear(state, "proj", sequence);
+    for (let block = 0; block < (model.blocks || 3); block++) {
+      const prefix = `blocks.${block}`;
+      const temporal = transpose(linear(state, `${prefix}.time.0`, transpose(layerNorm(state, `${prefix}.norm_t`, z)))
+        .map((row) => row.map(gelu)));
+      z = z.map((row, i) => row.map((value, j) => value + temporal[i][j]));
+      let feature = linear(state, `${prefix}.feat.0`, layerNorm(state, `${prefix}.norm_f`, z))
+        .map((row) => row.map(gelu));
+      feature = linear(state, `${prefix}.feat.3`, feature);
+      z = z.map((row, i) => row.map((value, j) => value + feature[i][j]));
+    }
+    const joined = z.flat().concat(sequence[sequence.length - 1]);
+    return linearOne(state, "head.2", linearOne(state, "head.0", joined).map(gelu));
+  }
+  function neuralDelta(model, rawSequence) {
+    const sequence = rawSequence.map((row) => row.map((value, i) => (value - model.input_mean[i]) / model.input_std[i]));
+    const scaled = model.kind === "lstm" ? lstmScaled(model, sequence) : mixerScaled(model, sequence);
+    return scaled.map((value, i) => value * model.target_std[i] + model.target_mean[i]);
+  }
+  function currentFeatures(t, w, rh, month, hour) {
+    return [t, rh, w, Math.sin(2 * Math.PI * hour / 24), Math.cos(2 * Math.PI * hour / 24),
+            Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12)];
+  }
+  function corrected(t, w, rh, delta) {
+    return { temp: t + delta[0], humidity: Math.min(100, Math.max(0, rh + delta[1])),
+             wind: Math.max(0, w + delta[2]) };
+  }
+  function fallbackPredict(t, w, rh, month, hour) {
+    const model = CM_KIND === "rf" ? CM : CM_FALLBACK;
+    const x = currentFeatures(t, w, rh, month, hour);
+    return corrected(t, w, rh, TARGETS.map((target) => modelDelta(model, x, target)));
+  }
+  function campusPredict(t, w, rh, month, hour) {
+    if (CM_KIND !== "rf") return fallbackPredict(t, w, rh, month, hour);
+    const x = currentFeatures(t, w, rh, month, hour);
+    return corrected(t, w, rh, TARGETS.map((target) => modelDelta(CM, x, target)));
+  }
+  const rowTime = (row) => Date.parse(`${row.date}T${String(row.hour).padStart(2, "0")}:00:00+09:00`);
+  function historyRow(rows, i, lag) {
+    const j = i - lag;
+    return j >= 0 && rowTime(rows[i]) - rowTime(rows[j]) === lag * 3600000 ? rows[j] : null;
+  }
+  function windowRows(rows, i, size) {
+    const first = historyRow(rows, i, size - 1);
+    return first ? rows.slice(i - size + 1, i + 1) : null;
+  }
+  function lagFeatureMap(rows, i) {
+    const r = rows[i], month = +r.date.slice(5, 7), hour = r.hour;
+    const values = { aws_ta: r.temp, aws_hm: r.humidity, aws_ws: r.wind,
+      hour_sin: Math.sin(2 * Math.PI * hour / 24), hour_cos: Math.cos(2 * Math.PI * hour / 24),
+      month_sin: Math.sin(2 * Math.PI * month / 12), month_cos: Math.cos(2 * Math.PI * month / 12) };
+    const source = { aws_ta: "temp", aws_hm: "humidity", aws_ws: "wind" };
+    for (const [column, key] of Object.entries(source)) {
+      for (const lag of [1, 2, 3, 6, 12, 24]) values[`${column}_lag${lag}`] = historyRow(rows, i, lag)?.[key] ?? NaN;
+      values[`${column}_d1`] = r[key] - values[`${column}_lag1`];
+      values[`${column}_d3`] = r[key] - values[`${column}_lag3`];
+      for (const size of [3, 6, 24]) {
+        const window = windowRows(rows, i, size);
+        values[`${column}_mean${size}`] = window ? window.reduce((sum, row) => sum + row[key], 0) / size : NaN;
+      }
+      const six = windowRows(rows, i, 6);
+      if (six) {
+        const mean = six.reduce((sum, row) => sum + row[key], 0) / six.length;
+        values[`${column}_std6`] = Math.sqrt(six.reduce((sum, row) => sum + (row[key] - mean) ** 2, 0) / (six.length - 1));
+      } else values[`${column}_std6`] = NaN;
+    }
+    const day = windowRows(rows, i, 24), sixWind = windowRows(rows, i, 6);
+    values.ta_range24 = day ? Math.max(...day.map((row) => row.temp)) - Math.min(...day.map((row) => row.temp)) : NaN;
+    values.ws_max6 = sixWind ? Math.max(...sixWind.map((row) => row.wind)) : NaN;
+    return values;
+  }
+  function sequenceFeatures(row) {
+    const month = +row.date.slice(5, 7), hour = row.hour;
+    return [row.temp, row.humidity, row.wind,
+      Math.sin(2 * Math.PI * hour / 24), Math.cos(2 * Math.PI * hour / 24),
+      Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12)];
+  }
+  function applyCampusSeries(rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i], month = +r.date.slice(5, 7);
+      if (CM_KIND === "rf") {
+        r._campus = campusPredict(r.temp, r.wind, r.humidity, month, r.hour);
+        continue;
+      }
+      if (CM_KIND === "lstm" || CM_KIND === "tsmixer") {
+        const window = windowRows(rows, i, CM.window);
+        r._campus = window
+          ? corrected(r.temp, r.wind, r.humidity, neuralDelta(CM, window.map(sequenceFeatures)))
+          : fallbackPredict(r.temp, r.wind, r.humidity, month, r.hour);
+        continue;
+      }
+      const featureMap = lagFeatureMap(rows, i);
+      const x = CM.features.map((name) => featureMap[name]);
+      r._campus = x.every(Number.isFinite)
+        ? corrected(r.temp, r.wind, r.humidity, TARGETS.map((target) => modelDelta(CM, x, target)))
+        : fallbackPredict(r.temp, r.wind, r.humidity, month, r.hour);
+    }
   }
   // 오늘 실측 반영: 최근 정시 실측 − (그 시각 예보 → AI 예측). 예보가 빗나간 만큼과 AI가 빗나간 만큼이
   // 함께 잡히고, 몇 시간 동안 같은 방향으로 이어지므로 exp(−경과시간/4시간)으로 줄여서 더한다.
@@ -73,8 +232,8 @@ const Standalone = (() => {
     const lead = (Date.parse(date + "T00:00:00Z") - Date.parse(err.date + "T00:00:00Z")) / 3600000 + hour - err.hour;
     return Math.exp(-Math.max(0, lead) / NOWCAST_TAU);
   }
-  function campusFeel(t, w, rh, month, hour, sens, err = null, date = null) {
-    const b = campusPredict(t, w, rh, month, hour);              // 반영 전 AI 예측
+  function campusFeel(t, w, rh, month, hour, sens, err = null, date = null, predicted = null) {
+    const b = predicted || campusPredict(t, w, rh, month, hour); // 반영 전 AI 예측
     const k = err && date ? nowcastWeight(err, date, hour) : 0;   // 오늘 실측 반영 가중치
     const c = k ? { temp: b.temp + k * err.temp,
                     humidity: Math.min(100, Math.max(0, b.humidity + k * err.humidity)),
@@ -109,7 +268,7 @@ const Standalone = (() => {
   function demoForecast() {
     const mean = [-2.4, 0.4, 5.7, 12.5, 17.8, 22.2, 25.0, 25.7, 21.2, 14.8, 7.2, 0.4];
     const today = kstNow().date, rows = [];
-    for (let d = 0; d < 3; d++) {
+    for (let d = -1; d < 3; d++) {
       const date = addDays(today, d), m = +date.slice(5, 7);
       for (let h = 0; h < 24; h++) rows.push({
         date, hour: h, temp: +(mean[m - 1] + 4.5 * Math.sin((h - 9) / 24 * 2 * Math.PI)).toFixed(1),
@@ -128,6 +287,7 @@ const Standalone = (() => {
       if (Array.isArray(js.hourly) && js.hourly.length && hoursAgo(js.updated_at) < 6) {
         fc = { hourly: js.hourly, source: js.source || "기상청 단기예보" };
         if (js.now && hoursAgo(js.now.time) < 3) fc.now = js.now;
+        applyCampusSeries(fc.hourly);
         fc.at = Date.now();
         return fc;
       }
@@ -137,7 +297,7 @@ const Standalone = (() => {
       const q = new URLSearchParams({
         latitude: C.app_ref[0], longitude: C.app_ref[1],
         hourly: "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation_probability",
-        wind_speed_unit: "ms", timezone: "Asia/Seoul", forecast_days: 3 });
+        wind_speed_unit: "ms", timezone: "Asia/Seoul", past_days: 1, forecast_days: 3 });
       const js = await (await fetch("https://api.open-meteo.com/v1/forecast?" + q)).json();
       const h = js.hourly;
       fc = { hourly: h.time.map((t, i) => ({
@@ -148,6 +308,7 @@ const Standalone = (() => {
     } catch (e) {
       fc = demoForecast();
     }
+    applyCampusSeries(fc.hourly);
     fc.at = Date.now();
     return fc;
   }
@@ -188,7 +349,7 @@ const Standalone = (() => {
     if (js && Number.isFinite(js.feels) && hoursAgo(js.time) < 6) return {
       feels: +js.feels.toFixed(1), temp: js.temp, wind: js.wind, humidity: Math.round(js.humidity),
       time: js.time.slice(11, 16), kind: "실측" };
-    const cm = campusFeel(cur.temp, cur.wind, cur.humidity, +cur.date.slice(5, 7), cur.hour, "보통");
+    const cm = campusFeel(cur.temp, cur.wind, cur.humidity, +cur.date.slice(5, 7), cur.hour, "보통", null, null, cur._campus);
     return { feels: +cm.feels.toFixed(1), temp: +cm.campusTemp.toFixed(1), wind: +cm.campusWind.toFixed(1),
              humidity: Math.round(cm.campusHum), time: `${String(cur.hour).padStart(2, "0")}:00`, kind: "AI 예측" };
   }
@@ -234,7 +395,7 @@ const Standalone = (() => {
       schedules: Object.keys(C.schedules), sensitivities: Object.keys(C.sensitivity),
       levels: C.levels.map((l) => ({ level: l.level, name: l.name, items: Object.values(l.categories).flat() })),
       stats: stats(),
-      data: { campus_model: "랜덤포레스트 축소판 · 만안 ↔ 안양대 3년치 학습",
+      data: { campus_model: `${CM.name || "캠퍼스 AI"} · ${CM.validation_year || "-"}년 검증 선택`,
               campus_obs: campus.kind === "실측" ? "안양대 500m 격자 실측 (기상청, 매시간 갱신)"
                                                  : "실측 파일이 없어 지금 시각 AI 예측" },
     };
@@ -252,7 +413,7 @@ const Standalone = (() => {
     const month = +target.slice(5, 7);
     const err = f.source.startsWith("기상청") ? nowcastError((await liveCampus())?.nowcast) : null;
     const hours = sel.map((r) => {
-      const cf = campusFeel(r.temp, r.wind, r.humidity, month, r.hour, sensitivity, err, target);
+      const cf = campusFeel(r.temp, r.wind, r.humidity, month, r.hour, sensitivity, err, target, r._campus);
       const x = [cf.campusTemp, cf.campusWind, cf.campusHum, cf.personal, r.hour, month, sensCode, r.pop];
       return { hour: r.hour, app: r.temp, wind: r.wind, pop: r.pop, feels: cf.personal, level: predict(x), cf };
     });
@@ -300,12 +461,12 @@ const Standalone = (() => {
         campus: +cf.climate.toFixed(1), wind: +cf.wind.toFixed(1), nowcast: +cf.nowcast.toFixed(1), sensitivity: +cf.sens.toFixed(1),
         range: Math.round(cf.low) !== Math.round(cf.high) ? [Math.round(cf.low), Math.round(cf.high)] : null,
         nowcast_hour: err && nowcastWeight(err, target, sel[0].hour) >= 0.05 ? err.hour : null,
-        basis: cf.nowcastW >= 0.05 ? "AI 예측(웹 축소판) + 오늘 실측 반영" : "AI 예측(웹 축소판)",
+        basis: cf.nowcastW >= 0.05 ? "검증 최고 모델 + 오늘 실측 반영" : "검증 최고 모델",
         level: lv.level, level_name: lv.name,
         categories: Object.entries(cats).map(([name, items]) => ({
           name, emoji: C.category_emoji[name],
           items: items.map((i) => ({ name: i, emoji: C.item_emoji[i] || "👕" })) })),
-        comment, tip, model: "RandomForest (웹)", feedback_total: st.total,
+        comment, tip, model: `${CM.name || "캠퍼스 AI"} (2024 검증 선택)`, feedback_total: st.total,
       },
       hourly: chart.map((h) => ({ hour: h.hour, app: +h.app.toFixed(1), feels: +h.feels.toFixed(1) })),
       warning, stats: st,
@@ -325,5 +486,5 @@ const Standalone = (() => {
     return { products: [], links };
   }
 
-  return { home, analyze, feedback, products };
+  return { home, analyze, feedback, products, _neuralDelta: neuralDelta };
 })();
