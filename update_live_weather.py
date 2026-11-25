@@ -115,11 +115,54 @@ def fetch_campus(key: str) -> dict:
     return add_nowcast(data)
 
 
-def fetch_forecast(tries: int = 3) -> dict:
+def update_manan_obs(stamp: str) -> dict:
+    """만안구 초단기실황(관측)을 시간별로 쌓는다 → docs/manan_obs.json (최근 3일).
+
+    새 모델의 지연특성(지난 24시간)에 Open-Meteo 추정값 대신 기상청 관측을 쓰기 위함.
+    직전 공개본을 이어받고, 빠진 시간(최근 24시간)만 기상청에 다시 묻는다.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+    obs = (previous("manan_obs.json") or {}).get("obs", {})
+    latest = (now - timedelta(minutes=40)).replace(minute=0)   # 초단기실황은 정시 40분 뒤 제공
+    added, failed = 0, 0
+    for k in range(24):
+        t = latest - timedelta(hours=k)
+        key = t.strftime("%Y-%m-%d %H:%M")
+        if key in obs:
+            continue
+        try:
+            v = weather.fetch_kma_ncst_at(t)
+            obs[key] = {"temp": v["temp"], "wind": v["wind"], "humidity": v["humidity"]}
+            added += 1
+        except Exception:
+            failed += 1
+    keep = (now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
+    obs = {k: v for k, v in sorted(obs.items()) if k >= keep}
+    DOCS.mkdir(exist_ok=True)
+    (DOCS / "manan_obs.json").write_text(
+        json.dumps({"source": "기상청 초단기실황 (안양시 만안구)", "obs": obs, "updated_at": stamp},
+                   ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"manan_obs.json: 초단기실황 {len(obs)}시간 보관 (이번에 {added}시간 추가, 실패 {failed})")
+    return obs
+
+
+def fetch_forecast(tries: int = 3, observed: dict | None = None) -> dict:
     last = None
     for _ in range(tries):
         try:
-            df = weather.fetch_kma_forecast()
+            # 가까운 6시간: 초단기예보(매시간 갱신)로 바꾸고, 나머지는 단기예보
+            ultra = None
+            if getattr(config, "USE_ULTRA_NEAR", True):
+                try:
+                    ultra = weather.fetch_kma_ultra()
+                except Exception:
+                    ultra = None
+            near = weather.overlay_ultra(weather.fetch_kma_forecast(), ultra)
+            # 지난 24시간: 만안구 초단기실황 기록 우선, 빈 시간만 Open-Meteo
+            df = weather.prepend_observed(near, observed or {})
+            df.attrs["ultra_hours"] = near.attrs.get("ultra_hours", 0)
+            df.attrs["ultra_base"] = near.attrs.get("ultra_base", "")
             break
         except Exception as e:
             last = e
@@ -127,6 +170,9 @@ def fetch_forecast(tries: int = 3) -> dict:
         raise RuntimeError(f"단기예보 {tries}번 시도 모두 실패: {last}")
     out = {
         "source": "기상청 단기예보",
+        "history_source": f"지난 시간: 초단기실황 {df.attrs.get('observed_hours', 0)}시간 + 나머지 Open-Meteo",
+        "near_source": (f"가까운 {df.attrs['ultra_hours']}시간: 초단기예보 ({df.attrs.get('ultra_base', '')} 발표), 나머지 단기예보"
+                        if df.attrs.get("ultra_hours") else "초단기예보 없음 — 전부 단기예보"),
         "area": config.APP_REF_NAME,
         "hourly": [{"date": t.strftime("%Y-%m-%d"), "hour": t.hour, "temp": r.temp, "wind": r.wind,
                     "humidity": r.humidity, "pop": r.pop}
@@ -174,7 +220,7 @@ def write(name: str, make, ok_key: str, stamp: str) -> None:
     (DOCS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-LEAD_HOURS = 2   # 홈 화면 비교 표의 'N시간 전 예측' (docs/standalone.js 의 LEAD_KEY 와 맞출 것)
+LEAD_HOURS = 2   # 홈 화면 비교 표의 'N시간 전 예측' (사이트 docs/standalone.js 의 LEAD_KEY 와 맞출 것)
 
 
 def update_history(stamp: str) -> None:
@@ -201,11 +247,14 @@ def update_history(stamp: str) -> None:
 
     if fc.get("hourly"):   # 사이트가 지금 보여주는 예측 (민감도 보통, 사이트와 같은 파일·같은 계산)
         err = site_model.nowcast_error(nc) if nc else None
-        for r in fc["hourly"]:
+        campus_predictions = site_model.campus_predict_series(fc["hourly"])
+        for r, campus_prediction in zip(fc["hourly"], campus_predictions):
             t = datetime.strptime(f"{r['date']} {r['hour']:02d}:00", "%Y-%m-%d %H:%M")
             if t <= now or t.date() != now.date():
                 continue                               # 아직 오지 않은 오늘 시각만
-            f = round(site_model.campus_feels(r["temp"], r["wind"], r["humidity"], t, err)["feels"], 1)
+            f = round(site_model.campus_feels(
+                r["temp"], r["wind"], r["humidity"], t, err, predicted=campus_prediction
+            )["feels"], 1)
             key = t.strftime("%Y-%m-%d %H:%M")
             entry = pred.setdefault(key, {"first": {"feels": f, "made": stamp}})
             entry["last"] = {"feels": f, "made": stamp}
@@ -232,10 +281,17 @@ def main() -> int:
             raise RuntimeError("KMA_APIHUB_KEY 비밀값이 없음")
         return fetch_campus(key)
 
+    observed = {}
+    if key or os.environ.get("KMA_API_KEY"):
+        try:
+            observed = update_manan_obs(stamp)
+        except Exception as e:   # 기록이 실패해도 예보·배포는 계속 (그땐 Open-Meteo로 채움)
+            print(f"manan_obs.json: 기록 실패 — {type(e).__name__} {e}", file=sys.stderr)
+
     def forecast():
         if not key and not os.environ.get("KMA_API_KEY"):
             raise RuntimeError("KMA_APIHUB_KEY 비밀값이 없음")
-        return fetch_forecast()
+        return fetch_forecast(observed=observed)
 
     write("campus_now.json", campus, "feels", stamp)
     write("forecast.json", forecast, "hourly", stamp)
@@ -256,6 +312,8 @@ def main() -> int:
                 print(f"  실측 반영 없음: {js.get('nowcast_error')}")
         if "hourly" in js:
             now = js.get("now")
+            print(f"  {js.get('history_source', '')}")
+            print(f"  {js.get('near_source', '')}")
             print(f"  만안구 예보 {len(js['hourly'])}시간"
                   + (f", 지금 {now['time']} 기온 {now['temp']}°C" if now else f", 실황 실패: {js.get('now_error')}"))
     return 0   # 실패해도 사이트 배포는 계속 (직전 값 또는 Open-Meteo·AI 예측으로 표시)

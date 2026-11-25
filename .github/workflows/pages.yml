@@ -12,7 +12,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "43 * * * *"   # 60분마다, 매시 43분. 실제 매시간 실행은 cron-job.org가 workflow_dispatch로 눌러줌 (이 저장소는 schedule이 돌지 않음)
+    - cron: "43 * * * *"   # 60분마다, 매시 43분 (GitHub schedule이 안 돌면 cron-job.org가 workflow_dispatch로 실행)
   workflow_dispatch:        # Actions 탭에서 수동 실행
 
 permissions:
@@ -27,7 +27,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -44,7 +44,8 @@ jobs:
         run: |
           # 실패하면 지금 공개된 파일을 유지하려고 사이트 주소를 알려 줌
           export PAGES_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
-          pip install --quiet requests pandas
+          # 새 모델(지연특성·신경망 포함) 계산에 numpy·scikit-learn·joblib 필요
+          pip install --quiet requests pandas numpy scikit-learn joblib
           python update_live_weather.py
 
       - uses: actions/configure-pages@v5
@@ -57,10 +58,19 @@ jobs:
         uses: actions/deploy-pages@v4
         continue-on-error: true   # GitHub 쪽 일시 오류("No artifacts named github-pages")가 가끔 남
 
-      - name: 배포 재시도 (40초 뒤)
+      - name: 배포 재시도 대기 (90초)
         if: steps.deployment.outcome == 'failure'
-        run: sleep 40
+        run: sleep 90
 
       - id: deployment_retry
         if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: 배포 재시도 대기 (3분)
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry.outcome == 'failure'
+        run: sleep 180
+
+      - id: deployment_retry2
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry.outcome == 'failure'
         uses: actions/deploy-pages@v4

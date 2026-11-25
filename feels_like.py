@@ -26,12 +26,17 @@ NOWCAST_TAU = 4.0  # 오늘 실측 반영 가중치가 줄어드는 속도 (시�
 _model = {"m": None, "loaded": False, "error": None}
 
 
-def campus_model() -> CampusModel | None:
-    """data/campus_model.joblib 불러오기. 없으면 data/train_data.csv로 바로 학습 (수 초)."""
+def campus_model():
+    """배포된 검증 1위 모델을 우선 사용하고, 없으면 기존 RF를 사용한다."""
     if _model["loaded"]:
         return _model["m"]
     _model["loaded"] = True
     try:
+        if config.DEPLOYED_CAMPUS_MANIFEST.is_file():
+            from deployed_model import DeployedCampusModel
+
+            _model["m"] = DeployedCampusModel(config.DEPLOYED_CAMPUS_MANIFEST)
+            return _model["m"]
         if not config.CAMPUS_MODEL_PATH.exists():
             if not config.CAMPUS_TRAIN_PATH.exists():
                 raise FileNotFoundError("data/train_data.csv 가 없어 캠퍼스 모델을 만들 수 없어요")
@@ -45,6 +50,16 @@ def campus_model() -> CampusModel | None:
     except Exception as e:  # 모델이 없어도 사이트는 동작 (보정 없이)
         _model["error"] = f"캠퍼스 AI 모델을 불러오지 못해 보정 없이 계산해요: {e}"
     return _model["m"]
+
+
+def deployed_model_status() -> dict:
+    from deployed_model import deployment_status
+
+    campus_model()
+    status = deployment_status()
+    if _model["error"]:
+        status["load_error"] = _model["error"]
+    return status
 
 
 def model_error() -> str | None:
@@ -71,7 +86,8 @@ def _predict(m, temp, hum, wind, times) -> np.ndarray:
     times = pd.to_datetime(pd.Series(times))
     x = pd.DataFrame({"aws_ta": np.asarray(temp, float), "aws_hm": np.asarray(hum, float),
                       "aws_ws": np.asarray(wind, float),
-                      "month": times.dt.month.to_numpy(), "hour": times.dt.hour.to_numpy()})
+                      "month": times.dt.month.to_numpy(), "hour": times.dt.hour.to_numpy(),
+                      "tm": times.to_numpy()})
     return m.predict(x) if m is not None else x[["aws_ta", "aws_hm", "aws_ws"]].to_numpy(float)
 
 

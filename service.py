@@ -12,7 +12,7 @@ import requests
 import config
 import model
 import outfit
-from feels_like import campus_batch, campus_feels_like, model_error
+from feels_like import campus_batch, campus_feels_like, deployed_model_status, model_error
 from weather import fetch_campus_now, get_forecast, nowcast_ref
 
 WEEKDAYS = "월화수목금토일"
@@ -103,10 +103,10 @@ def save_feedback(worn_level: int, feedback: str, sensitivity: str):
 def home() -> dict:
     fc = forecast()
     now = datetime.now()
+    h = fc.hourly
     if fc.now:
         app_now, label = fc.now["temp"], "기상청 초단기실황"
     else:
-        h = fc.hourly
         app_now = float(h.loc[(h["time"] - pd.Timestamp(now)).abs().idxmin(), "temp"])
         label = fc.source
 
@@ -124,10 +124,13 @@ def home() -> dict:
     else:                 # 실측이 없으면 지금 시각 예보 → 캠퍼스 AI 예측
         h = fc.hourly
         r = h.loc[(h["time"] - pd.Timestamp(now)).abs().idxmin()]
-        cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time)
+        campus_predictions = campus_batch(h, _cache["nowcast"])
+        predicted = campus_predictions.loc[r.name].to_dict()
+        cf = campus_feels_like(r.temp, r.wind, r.humidity, r.time, predicted=predicted)
         now_out = {"feels": round(cf.feels, 1), "temp": round(cf.campus_temp, 1),
                    "wind": round(cf.campus_wind, 1), "humidity": round(cf.campus_humidity),
                    "time": f"{pd.Timestamp(r.time):%H:%M}", "kind": "AI 예측"}
+    deployed = deployed_model_status()
     return {
         "campus": config.CAMPUS_NAME,
         "now_label": korean_datetime(now),
@@ -142,7 +145,12 @@ def home() -> dict:
         "levels": [{"level": l.level, "name": l.name, "items": list(l.items)} for l in outfit.LEVELS],
         "stats": feedback_stats(),
         "data": {
-            "campus_model": "랜덤포레스트 · 만안 ↔ 안양대 3년치(2023~2025) 시간별 학습",
+            "campus_model": (
+                f"{deployed.get('selected_model_name')} · "
+                f"{deployed.get('validation_year')}년 검증 선택"
+                if deployed.get("deployed")
+                else "랜덤포레스트 · 기존 앱 모델"
+            ),
             "campus_obs": "안양대 500m 격자 실측 (기상청, 약 1시간 지연)",
         },
     }
@@ -189,6 +197,8 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
     start_h, end_h = config.SCHEDULE_PRESETS.get(schedule, (9, 18))
 
     h = fc.hourly
+    h = h.sort_values("time").reset_index(drop=True)
+    campus_all = campus_batch(h, _cache["nowcast"])
     sel = h[(h["time"].dt.date == target) & (h["time"].dt.hour >= start_h) & (h["time"].dt.hour <= end_h)]
     if day == "오늘":
         sel = sel[sel["time"] >= pd.Timestamp(datetime.now()).floor("h")]
@@ -196,9 +206,9 @@ def analyze(day: str, schedule: str, sensitivity: str) -> dict:
         return {"error": "선택한 시간대의 예보가 없어요. 오늘 일정이 이미 끝났다면 '내일'을 선택하세요."}
 
     m = clf()
+    campus = campus_all.loc[sel.index].reset_index(drop=True)
     sel = sel.reset_index(drop=True)
     obs = campus_now()                       # 지난 시각: 500m 격자 실측
-    campus = campus_batch(sel, _cache["nowcast"])   # 남은 시각: AI 예측 + 오늘 실측 반영
     obs_hour = pd.Timestamp(obs["time"]).floor("h") if obs is not None else None
     hours = []
     for i, r in enumerate(sel.itertuples(index=False)):

@@ -7,6 +7,7 @@ from functools import lru_cache
 from flask import Flask, jsonify, request, send_from_directory
 
 import config
+from feels_like import deployed_model_status
 import outfit
 import service
 import shop
@@ -23,6 +24,12 @@ def index():
 @app.get("/api/home")
 def api_home():
     return jsonify(service.home())
+
+
+@app.get("/api/model-status")
+def api_model_status():
+    """검증 1위 체크포인트가 로컬호스트 앱에 연결됐는지 확인한다."""
+    return jsonify(deployed_model_status())
 
 
 @app.post("/api/analyze")

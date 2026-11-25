@@ -1,134 +1,300 @@
+> **이 저장소는 비교용(구버전) 사이트예요.** 신버전([Annyang](https://github.com/byeolgog/Annyang))과 같은 코드·모델(LightGBM + 지연특성, AWS로 학습)이고, 예보는 **전부 단기예보**를 써요 (`config.USE_ULTRA_NEAR = False`).
+> 신버전은 가까운 6시간에 초단기예보로 학습한 새 모델을 쓰고, 두 사이트의 '2시간 전 예측' 표로 병행 비교해요.
+> 이전 랜덤포레스트 사이트 코드는 `legacy-rf-site` 브랜치에 그대로 보관돼 있어요.
+
 # 오늘춥나?? — 안양대 캠퍼스 체감온도 AI
 
-### 👉 바로 보기: https://byeolgog.github.io/perceived-temperature-forAyu/
+### [서비스 바로 보기](https://byeolgog.github.io/perceived-temperature-forAyu/)
 
-2026 안양대학교 AI 경진대회 (AI26-016, 팀 환전)
+2026 안양대학교 AI 경진대회 프로젝트(AI26-016, 팀 환전)입니다.
 
-날씨앱만 믿고 나왔다가 캠퍼스에서 떠는 일이 없도록, **날씨앱 예보(안양시 만안구)를 AI로 안양대 캠퍼스 날씨로 보정**해 체감온도를 알려주고, 캠퍼스에 머무는 시간 중 가장 추운 때에 맞춰 **옷차림을 추천**합니다.
+안양시 만안구 날씨를 안양대학교 캠퍼스의 기온·습도·풍속으로 보정하고, 기상청 체감온도 공식과 개인 추위 민감도를 적용해 캠퍼스에 머무는 동안 필요한 옷차림을 추천합니다.
 
-| 날씨앱 값 그대로 쓸 때 | 캠퍼스 AI 보정 후 |
+## 현재 학습·평가 기준
+
+| 구분 | 현재 기준 |
 |---|---|
-| 캠퍼스 체감온도 ±1°C 적중 56.7% | **72.0%** |
-| ±2°C 적중 71.8% | **90.8%** |
+| 비교 모델 | RF, RF + 지연특성, LightGBM + 지연특성, LSTM, TSMixer |
+| 학습 | 2022~2023년 |
+| 검증 및 최종 모델 선택 | 2024년 |
+| 회고적 테스트 | 2025년, 모든 후보 모델 평가 |
+| 추가 외부 테스트 | 2026년, 안양대 격자 정답이 준비된 기간만 별도 평가 |
+| 최종 선택 원칙 | 2024년 검증 종합점수 1위로 고정. 2025·2026년 결과로 다시 선택하지 않음 |
+| 배포 | 같은 최고 모델을 Flask 로컬호스트와 `docs/` 정적 사이트에 반영 |
 
-<sub>2025년 1년치로 시험 (2023~2024년으로 학습, 정답은 기상청 안양대 500m 격자 값)</sub>
+2025년 결과는 개발 중 이미 여러 번 확인했으므로 엄밀한 미공개 테스트가 아니라 **회고적 백테스트**로 표기합니다. 2026년은 현재 AWS 입력만 있고 캠퍼스 격자 정답이 없어 아직 모델 평가에 포함되지 않습니다.
 
-오늘 실측까지 반영하면 가까운 시간은 더 정확해져요 (±1°C 적중, 2025년 시험): 1시간 뒤 **78.9%**, 3시간 뒤 74.6%, 6시간 뒤는 거의 72%로 돌아옴. 겨울(10~4월) 1시간 뒤는 65.2 → 72.8%.
+> 기존 운영 RF의 참고 성능은 2023~2024년 학습 → 2025년 평가에서 체감온도 ±1°C 72.0%, ±2°C 90.8%였습니다. 이는 새 2022~2023년 학습 → 2024년 검증 비교 실험과 데이터 분할이 다르므로 새 모델 순위와 직접 섞지 않습니다.
 
-## 어떻게 동작하나요
+새 다섯 모델의 최종 수치는 전체 Colab 학습 후 `validation_comparison.csv`와 `comparison_2025.csv`에 생성됩니다. 재학습이 끝나기 전에는 위 기존 RF 수치를 새 최고 모델의 결과로 해석하지 않습니다.
 
-1. **날씨 수집**: 기상청 만안구 초단기실황(지금 기온)과 단기예보(시간별 기온·습도·풍속·강수확률). 없으면 Open-Meteo
-2. **캠퍼스 날씨 (AI)**: 남은 시각은 캠퍼스 보정 모델이 안양대 기온·습도·풍속을 예측, 지난 시각은 안양대 500m 격자 실측값
-   - **오늘 실측 반영**: 최근 정시 실측 − (그 시각 예보로 AI가 낸 예측) = 오늘의 오차. 예보가 빗나간 만큼과 AI가 빗나간 만큼이 함께 잡히고, 몇 시간은 같은 방향으로 이어지므로 앞으로의 예측에 `exp(−경과시간/4시간)`만큼 더함 (1시간 뒤 78%, 4시간 뒤 37%, 12시간 뒤 5%)
-3. **체감온도 (공식)**: 기상청 공식 그대로 (10~4월 바람: 기온 10°C 이하·풍속 1.3 m/s 이상일 때, 5~9월 습도) + 추위 민감도(±2°C)
-4. **옷차림 (AI)**: 시간대별 옷차림 단계를 예측해 가장 두껍게 입어야 하는 시간 기준으로 추천
-5. **오늘 예측 vs 실측**: 매시간 그 시각 사이트 예측(처음·직전)과 캠퍼스 실측을 `history.json`에 쌓아, 홈 화면에 "오늘 AI 예측, 얼마나 맞았나" 표로 보여줌 (`site_model.py`가 브라우저와 똑같이 계산)
-6. **실시간 갱신**: GitHub Actions가 매시간 안양대 500m 격자 실측값과 기상청 만안구 실황·예보를 받아 사이트에 반영
+## 서비스 동작 방식
 
-### 캠퍼스 보정 모델 (Random Forest 회귀)
+1. 기상청 만안구 초단기실황과 시간별 단기예보를 가져옵니다. 실패하면 Open-Meteo 또는 데모 데이터를 사용합니다.
+2. 2024년 검증으로 선택한 최고 모델이 만안구 예보를 안양대 캠퍼스 기온·습도·풍속으로 보정합니다.
+3. 최근 안양대 500m 격자 실측이 있으면 현재 오차를 앞으로의 예측에 `exp(-경과시간/4시간)`만큼 감쇠해 반영합니다.
+4. 기상청 체감온도 공식과 사용자 추위 민감도(±2°C)를 적용합니다.
+5. 캠퍼스 체류 시간 중 가장 불리한 체감온도를 기준으로 옷차림을 추천합니다.
+6. GitHub Actions가 실측·예보·예측 기록을 갱신하고 GitHub Pages를 배포합니다.
 
-| 항목 | 내용 |
-|---|---|
-| 입력 | 만안 기온·습도·풍속, 시간대·월 |
-| 정답 | 안양대 500m 격자 기온·습도·풍속 ('안양대 − 만안' 보정량을 정답마다 따로 학습) |
-| 학습 데이터 | 안양만안 AWS(377) ↔ 안양대 500m 격자, 2023~2025년 시간별 26,150줄 (`data/train_data.csv`) |
-| 크기 | 정답마다 나무 100그루 (서버) / 20그루 축소판 (웹) |
-| 한계 | 겨울은 풍속이 1.3 m/s 기준선을 넘나들면 체감온도가 크게 바뀌어 정확도가 낮음 → 기준선 근처는 화면에 범위로 표시 |
+체감온도는 10~4월에는 저온·바람 공식을, 5~9월에는 여름철 습도 공식을 사용합니다. 겨울에 풍속이 1.3m/s 기준선 부근이면 체감온도가 급변할 수 있어 화면에 범위로 표시합니다.
 
-고도·바람 배율 같은 추정 계수는 쓰지 않아요. 기온의 고도 차이도 500m 격자 자료에 이미 들어 있어 모델이 데이터로 배웁니다.
+## 데이터 구성
 
-### 옷차림 모델 (Random Forest 분류)
+| 경로 | 내용 | 현재 상태 |
+|---|---|---|
+| `data/train_data.csv` | 만안 AWS와 안양대 격자 정답을 합친 기존 자료 | 2023~2025년 |
+| `data/22train.csv` | 2022년 만안 AWS 원자료 | 입력만 있음 |
+| `data/grid/grid_2022_01.csv`~`grid_2022_12.csv` | 2022년 안양대 500m 격자 정답 | 12개월 준비됨 |
+| `data/26data.csv` | 2026년 만안 AWS 원자료 | 2026-01-01~2026-11-21 부분 자료, 정답 없음 |
+| `data/prepared/model_data.csv` | 위 자료를 학습 형식으로 합친 생성 파일 | 현재 2022~2025년, Git 제외 |
+| `data/prepared/quality_report.json` | 연도별 기간·누락·결측·병합 상태 | 전처리할 때 갱신 |
 
-캠퍼스 기온·풍속·습도, 개인 체감온도, 시각, 월, 추위 민감도, 강수확률 → 옷차림 8단계(한여름~한겨울).
-'기온별 옷차림 표' 규칙 라벨로 시작하고, 학생 제보("이렇게 입었는데 추워요/더워요")로 다시 학습합니다.
-현재 정확도(약 82%)는 규칙 라벨 기준이라, 본선 기준(7/10)은 실제 사용자 제보로 다시 재야 합니다.
+`prepare_training_data.py`는 원본 CSV를 수정하지 않고 `data/prepared/`에 새 파일을 만듭니다. 2026년을 평가하려면 같은 기간의 안양대 격자 정답을 `data/grid/`에 추가한 뒤 다시 전처리해야 합니다. 2026년 자료가 1년 미만이어도 평가할 수 있지만 결과에는 실제 기간과 행 수를 함께 기록합니다.
 
-## 내 컴퓨터에서 실행하기
+## 비교 모델
 
-준비물: **Python 3.9 이상** (설치할 때 "Add python.exe to PATH" 체크)
+| 모델 | 입력 | 체크포인트 | 학습 장치 |
+|---|---|---|---|
+| RF | 현재 시각 기온·습도·풍속, 시각·월 | `best.joblib` | CPU |
+| RF + 지연특성 | 현재값, 1~24시간 지연값, 변화량, 이동통계 | `best.joblib` | CPU |
+| LightGBM + 지연특성 | RF + 지연특성과 같은 입력 | `best.joblib` | CPU |
+| LSTM | 최근 24시간 시퀀스 | `best.pt` | GPU 권장 |
+| TSMixer | 최근 24시간 시퀀스 | `best.pt` | GPU 권장 |
+
+모든 모델은 안양대와 만안구의 기온·습도·풍속 차이인 보정량을 예측합니다. RF와 LightGBM은 모두 결정트리 계열이지만, RF는 여러 독립 트리의 평균을 사용하고 LightGBM은 앞선 트리의 오차를 다음 트리가 순차적으로 보완합니다.
+
+## Colab에서 전체 실행하기 — 권장
+
+전체 실행 노트북은 프로젝트 폴더의 한 단계 위에 있습니다.
+
+```text
+C:\Users\prese\myvsc\perceived_temperature_colab.ipynb
+```
+
+1. `perceived-temperature-forAyu` 폴더와 `perceived_temperature_colab.ipynb`를 Google Drive에 올립니다.
+2. Colab에서 노트북을 열고 **런타임 → 런타임 유형 변경 → T4 GPU**를 선택합니다.
+3. 첫 셀부터 순서대로 실행합니다. 노트북은 Drive 안의 프로젝트 폴더를 자동으로 찾습니다.
+4. 동일한 이름의 프로젝트가 여러 개면 첫 코드 셀의 `PROJECT_DIR`에 정확한 Drive 경로를 입력합니다.
+
+노트북은 다음 과정을 순서대로 수행합니다.
+
+1. Drive 연결과 프로젝트 경로 확인
+2. `requirements-train.txt` 설치와 GPU 확인
+3. 2022년 격자 12개 확인, 없을 때만 수집
+4. `data/prepared/model_data.csv` 생성과 연도 확인
+5. 다섯 모델을 2022~2023년으로 학습하고 2024년으로 검증
+6. 전체·세부·계절별 검증 비교표 출력
+7. 2024년 종합점수 1위를 `selection.json`에 저장
+8. 선택을 고정한 채 모든 모델을 2025년과 가능한 2026년에 평가
+9. 최고 모델을 Flask와 정적 사이트에 배포하고 예측 일치 여부 확인
+
+현재 저장소에는 2022년 격자 파일이 있으므로 API 키 없이 해당 단계를 건너뜁니다. 다시 수집해야 한다면 Colab 왼쪽의 **보안 비밀(Secrets)**에 `KMA_API_KEY`를 만들고 API허브 인증키를 넣습니다. 인증키를 코드·노트북·README에 직접 적거나 Git에 올리지 마세요.
+
+## 로컬에서 학습·평가하기
+
+Python 3.9 이상을 사용합니다.
+
+### 1. 환경 설치와 데이터 준비
 
 ```powershell
 git clone https://github.com/byeolgog/perceived-temperature-forAyu.git
 cd perceived-temperature-forAyu
-pip install -r requirements.txt
-python train_campus.py     # 캠퍼스 모델: 채점 결과 출력 + data/campus_model.joblib
-python train.py            # 옷차림 모델
-python server.py           # → http://localhost:5000
+python -m pip install -r requirements-train.txt
+python prepare_training_data.py --grid-dir data/grid
 ```
 
-- Git이 없으면 저장소의 **Code → Download ZIP**으로 받아 압축을 풀고, 폴더에서 **우클릭 → 터미널에서 열기**
-- 모델 파일(`data/*.joblib`)은 용량이 커서 올리지 않아요. 받은 컴퓨터마다 한 번 학습하세요 (약 20초)
-- 설치 없이 보려면 `docs/index.html`을 더블클릭 (웹 체험판: 실시간 파일을 못 읽어 Open-Meteo 예보와 AI 예측 표시)
+생성 결과에서 2022~2025년이 모두 보여야 합니다.
 
-| 증상 | 해결 |
+```powershell
+python -c "import pandas as pd; d=pd.read_csv('data/prepared/model_data.csv'); print(pd.to_datetime(d.tm).dt.year.value_counts().sort_index())"
+```
+
+### 2. 모델별 학습과 2024년 검증
+
+```powershell
+python train_model.py --model rf       --data data/prepared/model_data.csv
+python train_model.py --model rf-lag   --data data/prepared/model_data.csv
+python train_model.py --model lightgbm --data data/prepared/model_data.csv
+python train_model.py --model lstm     --data data/prepared/model_data.csv --seeds 3 --device auto
+python train_model.py --model tsmixer  --data data/prepared/model_data.csv --seeds 3 --device auto
+```
+
+`--device auto`는 CUDA가 있으면 GPU를 사용하고 없으면 CPU를 사용합니다. 신경망 기본값은 최근 24시간, 시드 3개, 최대 60에폭, early stopping patience 8입니다.
+
+### 3. 2024년 최고 모델 선택
+
+```powershell
+python compare_checkpoints.py --select-only --models rf rf-lag lightgbm lstm tsmixer
+```
+
+이 명령은 2025·2026년 데이터를 읽지 않고 2024년 검증 결과만 사용해 `compare_runs/checkpoints/selection.json`을 만듭니다.
+
+### 4. 선택을 고정한 뒤 모든 모델 테스트
+
+```powershell
+python compare_checkpoints.py --data data/prepared/model_data.csv --test-year 2025 --device auto --models rf rf-lag lightgbm lstm tsmixer
+```
+
+2026년 안양대 격자 정답까지 합쳐진 경우에만 다음 명령을 추가로 실행합니다.
+
+```powershell
+python compare_checkpoints.py --data data/prepared/model_data.csv --test-year 2026 --device auto --models rf rf-lag lightgbm lstm tsmixer
+```
+
+테스트 표의 순위와 관계없이 최종 선택은 2024년에 만든 `selection.json` 그대로 유지됩니다.
+
+## 로그와 결과 파일
+
+| 경로 | 내용 |
 |---|---|
-| `python`을 찾을 수 없음 | PATH 체크하고 재설치, 또는 `py server.py` |
-| `No module named ...` | `pip install -r requirements.txt` 다시 실행 |
-| `Address already in use` | 이미 켜져 있음 → 브라우저에서 열기 |
-| 화면이 예전 그대로 | 서버를 껐다 켜고 `Ctrl + F5` |
+| `compare_runs/logs/<모델>/train_<시각>.log` | 실행별 학습 로그. 재학습해도 이전 로그 유지 |
+| `compare_runs/checkpoints/<모델>/best.*` | 모델별 최고 체크포인트 |
+| `compare_runs/checkpoints/<모델>/metadata.json` | 설정, 데이터 해시, 검증 지표, 실행 환경 |
+| `compare_runs/checkpoints/validation_comparison.csv` | 2024년 전체 검증 비교 |
+| `compare_runs/checkpoints/validation_season_comparison.csv` | 2024년 계절별 검증 비교 |
+| `compare_runs/checkpoints/selection.json` | 2024년 검증으로 고정한 최종 모델 |
+| `compare_runs/checkpoints/comparison_<연도>.csv` | 해당 테스트 연도의 모든 모델 비교 |
+| `compare_runs/checkpoints/comparison_<연도>_season_metrics.csv` | 해당 테스트 연도의 계절별 지표 |
 
-### API 키 (선택)
+학습 중에도 성능이 출력됩니다. RF·RF-lag는 25개 트리마다 종합점수·체감 MAE·±1°C 적중률을, LightGBM은 50회 부스팅마다 검증 오차를, LSTM·TSMixer는 매 에폭 검증 loss·현재 best·patience·학습률을 기록합니다.
 
-키가 없어도 동작합니다(Open-Meteo·데모 데이터). `.env.example`을 `.env`로 복사해 키를 넣고 서버를 다시 켜세요. **`.env`는 깃허브에 올리거나 공유하지 마세요.**
+## 종합점수
 
-| 키 | 용도 | 발급처 |
+종합점수는 기상청 공식 지표가 아니라 후보 모델을 같은 기준으로 선택하기 위한 이 프로젝트의 0~100점 지표입니다. 점수 버전은 `overall_v2_season_balanced`입니다.
+
+```text
+MAE 점수 = 100 × clip(1 - 체감온도 MAE / 3°C, 0, 1)
+
+종합점수 = 0.40  × 연중 ±1°C 적중률
+         + 0.075 × 봄(3~5월) ±1°C 적중률
+         + 0.075 × 여름(6~8월) ±1°C 적중률
+         + 0.075 × 가을(9~11월) ±1°C 적중률
+         + 0.075 × 겨울(12~2월) ±1°C 적중률
+         + 0.15  × 연중 ±2°C 적중률
+         + 0.15  × MAE 점수
+```
+
+| 항목 | 비중 | 목적 |
+|---|---:|---|
+| 연중 ±1°C 적중률 | 40% | 사용자가 체감하는 작은 오차를 가장 중요하게 반영 |
+| 사계절 ±1°C 적중률 | 계절별 7.5%, 합계 30% | 표본이 많은 계절에 결과가 치우치지 않도록 보정 |
+| 연중 ±2°C 적중률 | 15% | 큰 오차가 자주 나는 모델에 불이익 부여 |
+| 체감온도 MAE 점수 | 15% | 임계값 밖의 연속적인 오차 크기 반영 |
+
+10~4월 겨울 체감온도 공식 기간의 적중률도 별도로 출력하지만 종합점수에는 넣지 않습니다. 종합점수에는 일반 계절 구분인 겨울 12~2월 지표가 들어갑니다.
+
+## 최고 모델 배포
+
+2024년 최고 모델 선택과 테스트가 끝난 뒤 실행합니다.
+
+```powershell
+python deploy_best_model.py --data data/prepared/model_data.csv
+python web_export.py
+python verify_static_export.py --manifest data/deployed_campus_model/manifest.json --model-js docs/model.js --data data/prepared/model_data.csv
+```
+
+- `deploy_best_model.py`는 선택 체크포인트와 RF fallback을 `data/deployed_campus_model/`에 복사하고 72시간 추론을 검사합니다.
+- `web_export.py`는 같은 최고 모델을 브라우저용 `docs/model.js`로 변환합니다.
+- `verify_static_export.py`는 Python 체크포인트와 정적 모델의 예측 차이를 검사합니다.
+- RF, RF-lag, LightGBM, LSTM, TSMixer 모두 Flask와 정적 사이트에서 사용할 수 있습니다.
+- 지연특성·신경망 모델은 과거 문맥이 부족한 첫 구간만 함께 배포된 RF로 보완합니다.
+
+### Flask 로컬호스트
+
+```powershell
+python server.py
+```
+
+- 서비스: `http://localhost:5000`
+- 연결 모델 확인: `http://localhost:5000/api/model-status`
+
+### 정적 사이트 로컬 확인
+
+```powershell
+python -m http.server 8000 --directory docs
+```
+
+- 정적 사이트: `http://localhost:8000`
+- GitHub Pages에는 생성된 `docs/model.js`와 수정된 사이트 코드를 커밋해야 새 최고 모델이 반영됩니다.
+
+## API 키와 보안
+
+키가 없어도 Open-Meteo와 데모 데이터로 사이트를 실행할 수 있습니다. 실시간 기상청 자료를 사용하려면 `.env.example`을 `.env`로 복사하고 필요한 값만 설정합니다.
+
+| 이름 | 사용 위치 | 용도 |
 |---|---|---|
-| `KMA_API_KEY` | 기상청 단기예보·초단기실황 | data.go.kr '기상청_단기예보 조회서비스' |
-| `KMA_APIHUB_KEY` | 위와 같음 + 안양대 500m 격자 실측값 | apihub.kma.go.kr (고해상도 격자자료 활용신청) |
-| `NAVER_CLIENT_ID/SECRET` | 추천 옷 예시 이미지 | developers.naver.com 검색 API |
-| `OPENAI_API_KEY` | 'AI 한마디' 문장 | platform.openai.com |
+| `KMA_API_KEY` | Colab Secret 또는 로컬 `.env` | Colab에서는 API허브 과거 격자 수집 키, 로컬에서는 공공데이터포털 단기예보 키 |
+| `KMA_APIHUB_KEY` | 로컬 `.env`, GitHub Actions Secret | 안양대 실측과 기상청 예보 갱신 |
+| `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` | 로컬 `.env` | 추천 옷 검색 |
+| `OPENAI_API_KEY` | 로컬 `.env` | 선택적 AI 문장 생성 |
 
-## 웹사이트 배포 (GitHub Pages)
+`.env`, API 키, Colab Secret 값은 저장소·노트북 출력·README에 올리지 않습니다. 노출된 키는 API허브에서 재발급합니다.
 
-`.github/workflows/pages.yml`이 main에 올라올 때와 **매시간** `docs/`를 배포합니다. 배포할 때 저장소 비밀값의 인증키로 안양대 실측값(`campus_now.json`)과 기상청 만안구 실황·단기예보(`forecast.json`)를 받아 함께 올려요. 사이트 파일에는 키가 들어가지 않습니다.
+## GitHub Pages 배포
 
-API허브에서 **고해상도 격자자료**와 **단기예보** 둘 다 활용신청되어 있어야 해요. 단기예보 권한이 없으면 사이트는 Open-Meteo 예보로 계산합니다.
+`.github/workflows/pages.yml`은 `main` 브랜치 push, 수동 실행, 정기 실행 시 다음 작업을 수행합니다.
 
-처음 한 번만:
+1. `KMA_APIHUB_KEY`로 안양대 실측과 만안구 실황·예보 수집
+2. `docs/campus_now.json`, `docs/forecast.json`, `docs/history.json` 갱신
+3. `docs/`를 GitHub Pages에 배포
 
-1. Settings → Secrets and variables → Actions → **New repository secret**: `KMA_APIHUB_KEY` = API허브 인증키
-2. Settings → Pages → Source: **GitHub Actions**
-3. Actions → 'Pages (캠퍼스 실측 갱신)' → **Run workflow**
+처음 한 번 설정합니다.
 
-실측값 받기에 실패하면 직전 값을 유지하고 다음 시간에 다시 시도합니다. 6시간 넘게 갱신이 없으면 화면은 AI 예측으로 바뀝니다. 저장소에 60일 동안 변경이 없으면 GitHub이 매시간 실행을 멈추니, Actions 탭에서 다시 켜세요.
+1. GitHub 저장소의 **Settings → Secrets and variables → Actions**에서 `KMA_APIHUB_KEY`를 만듭니다.
+2. **Settings → Pages → Source**를 **GitHub Actions**로 선택합니다.
+3. **Actions → Pages (캠퍼스 실측 갱신) → Run workflow**를 실행합니다.
 
-## 파일 구조
+사이트 파일에는 인증키가 포함되지 않습니다. 실측 갱신에 실패하면 직전 공개 데이터를 유지하고, 데이터가 오래되면 화면은 AI 예측으로 전환합니다.
 
-| 파일 | 역할 |
+## 주요 파일
+
+| 경로 | 역할 |
 |---|---|
-| `campus_model.py` | 캠퍼스 보정 모델 + 기상청 체감온도 공식 |
-| `train_campus.py` | 캠퍼스 모델 학습·채점 (`--data`, `--test-year`) |
-| `feels_like.py` | 캠퍼스 체감 계산: 실측 또는 AI 예측 → 기상청 공식 → 개인 민감도 |
-| `weather.py` | 예보 수집(기상청·Open-Meteo·데모) + 안양대 500m 격자 실측 |
-| `model.py`, `train.py`, `outfit.py` | 옷차림 모델과 옷차림 8단계 표 |
-| `service.py`, `server.py` | 화면용 계산 묶음, Flask 서버 + API |
-| `shop.py` | 추천 옷 예시 (네이버 쇼핑 검색) |
-| `config.py` | 좌표, 경로, 민감도 등 설정 |
-| `docs/` | 화면 (`index.html`), 웹 체험판 로직 (`standalone.js`), 웹용 모델 (`model.js`) |
-| `web_export.py` | 웹용 모델 만들기: `config.py`·`outfit.py`·학습 데이터를 바꾸면 다시 실행 |
-| `update_live_weather.py` | 안양대 실측 → `docs/campus_now.json`, 만안구 실황·예보 → `docs/forecast.json`, 예측·실측 기록 → `docs/history.json` (Actions가 매시간 실행) |
-| `site_model.py` | 브라우저(standalone.js)와 똑같은 캠퍼스 체감 계산 — 예측 기록용 |
-| `data/train_data.csv` | 캠퍼스 모델 학습 데이터 |
-| `notebooks/` | 학습 데이터를 만들고 실험한 Colab 노트북 (아래 참고) |
+| `prepare_training_data.py` | 원본 AWS 정리, 안양대 격자 병합, 품질 보고서 생성 |
+| `train_model.py` | 비교 모델 하나를 학습하고 최고 체크포인트·로그 저장 |
+| `compare_models.py` | 공통 특성·모델·채점·종합점수 코드 |
+| `compare_checkpoints.py` | 2024년 모델 선택과 연도별 전체 모델 테스트 |
+| `deploy_best_model.py` | `selection.json`의 최고 모델을 Flask용으로 배포 |
+| `deployed_model.py` | 다섯 모델의 공통 Flask 추론기 |
+| `web_export.py` | 최고 모델을 `docs/model.js`로 변환 |
+| `verify_static_export.py` | Python 모델과 정적 모델 예측 일치 검사 |
+| `static_neural.py` | LSTM·TSMixer 정적 추론의 NumPy 기준 구현 |
+| `service.py`, `server.py` | Flask 서비스와 API |
+| `feels_like.py` | 캠퍼스 보정, 기상청 체감온도, 개인 민감도 계산 |
+| `weather.py` | 기상청·Open-Meteo·데모 예보와 실측 수집 |
+| `update_live_weather.py` | GitHub Pages용 실시간 JSON 생성 |
+| `site_model.py` | 정적 브라우저 모델과 같은 방식의 기록용 추론 |
+| `docs/index.html` | 정적 사이트 화면 |
+| `docs/standalone.js` | 정적 사이트 로직과 다섯 모델 브라우저 추론 |
+| `docs/model.js` | `web_export.py`로 생성한 정적 모델·설정 |
+| `requirements-train.txt` | 서비스·LightGBM·PyTorch를 포함한 전체 의존성 |
 
-## 학습 데이터 다시 만들기 (`notebooks/`)
+## 노트북
 
-| 순서 | 노트북 | 하는 일 |
-|---|---|---|
-| 1 | `1_campus_grid_collect.ipynb` | API허브 500m 격자(특정지점 다중요소, 37.3921, 126.9206)로 안양대 시간별 값 수집 → 구글 드라이브 |
-| 2 | `2_aws_377_clean.ipynb` | 기상자료개방포털에서 받은 안양만안(377) AWS 시간자료 CSV 정리 |
-| 3 | `3_merge_train_data.ipynb` | 같은 시각끼리 합쳐 `train_data.csv` 만들기 |
-| 4 | `4_train_campus_model.ipynb` | 모델 비교(평균 편차·선형 회귀·랜덤포레스트), 적중률 채점 |
+| 노트북 | 용도 |
+|---|---|
+| `../perceived_temperature_colab.ipynb` | 준비·학습·비교·테스트·배포 전체 자동 실행 |
+| `notebooks/1_campus_grid_collect.ipynb` | API허브 안양대 500m 격자 수집 |
+| `notebooks/2_aws_377_clean.ipynb` | 안양만안 AWS(377) 원자료 정리 |
+| `notebooks/3_merge_train_data.ipynb` | AWS와 격자 정답 병합 |
+| `notebooks/4_train_campus_model.ipynb` | 기존 단일 RF 실험 |
+| `notebooks/5_compare_models.ipynb` | 비교 모델 실험용 노트북 |
 
-새 `train_data.csv`를 `data/`에 넣고 `python train_campus.py` → `python web_export.py`.
+## 문제 해결
 
-## 앞으로
-
-- **Air Fit 모델로 옷차림 분류 교체** (예선 자료 6쪽, MIT 라이선스): `model.py`의 `make_model()`·`train()`·`predict_level()`만 바꾸면 됩니다. 사용 시 출처를 남겨야 해요.
-- **실제 사용자 테스트**: 학생 5명 체감 제보로 본선 기준(7/10) 확인
+| 증상 | 확인할 내용 |
+|---|---|
+| `model_data.csv`가 없다고 나옴 | `python prepare_training_data.py --grid-dir data/grid`를 먼저 실행 |
+| 2022년 학습 데이터가 없다고 나옴 | `data/grid/grid_2022_01.csv`~`grid_2022_12.csv` 존재 여부 확인 |
+| 2026년 테스트 데이터가 없다고 나옴 | `26data.csv`만으로는 부족하며 같은 기간의 안양대 격자 정답 필요 |
+| CUDA가 `False` | Colab 런타임을 T4 GPU로 변경 후 환경 설치 셀부터 다시 실행 |
+| 정적 사이트가 예전 모델을 표시 | `deploy_best_model.py` → `web_export.py` 재실행 후 브라우저 강력 새로고침 |
+| `/api/model-status`가 `legacy_rf` | 최고 모델 배포 명령을 실행해 `data/deployed_campus_model/manifest.json` 생성 |
+| `Address already in use` | 기존 서버를 종료하거나 이미 열린 `http://localhost:5000` 사용 |
 
 ## 시연 팁
 
-- 주소 끝에 `#analyze`를 붙이면 바로 분석 화면부터 시작 (녹화용)
-- '하교 시간 알림'은 브라우저 알림이라 탭이 열려 있어야 울려요
-- 로그인은 '사용자 정보 수집 안 함' 범위에 따라 넣지 않았어요
+- 주소 끝에 `#analyze`를 붙이면 분석 화면부터 시작합니다.
+- 하교 시간 알림은 브라우저 탭이 열려 있어야 작동합니다.
+- 로그인과 사용자 식별 정보 수집은 사용하지 않습니다.
